@@ -1540,3 +1540,6 @@ export function buildToyChocks({gap = 1.3} = {}) {
   }, group);
   return {group, roll() {}};
 }
+
+// shared helpers for the other kits (the port reuses the airport's cab, wheels and merged-part builder)
+export {Parts, tpl, part, axle, makeWheel, roller, steerer, mats, cab, extrude, profile, roundedPoly, rb, cylG, textTex, decalMat, canvasTex, sideTex, drawMark, LIVERY, ram, barGeo, placeBar, sphere, dome};

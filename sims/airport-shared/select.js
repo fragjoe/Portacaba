@@ -40,8 +40,8 @@ export function createSelection(scene, stage) {
   scene.add(glow);
 
   // the route: a flat ribbon on the ground, a soft halo under a solid core
-  const routeCore = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({color: BLUE, transparent: true, depthWrite: false}));
-  const routeHalo = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({color: '#7da0f6', transparent: true, opacity: 0.35, depthWrite: false}));
+  const routeCore = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({color: BLUE, transparent: true, depthWrite: false, side: THREE.DoubleSide}));
+  const routeHalo = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({color: '#7da0f6', transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide}));
   routeCore.renderOrder = routeHalo.renderOrder = 2;
   routeCore.visible = routeHalo.visible = false;
   scene.add(routeHalo, routeCore);

@@ -29,9 +29,9 @@ One 40 ft box, `AURU 482113 9`, from the ship's deck to the city road in 47.3 s.
 | `sims/port-collide/` | Collision sweep (movers vs movers and vs every static box) |
 | `sims/port-bench/` | Every model side by side |
 | `sims/port-truck-preview/` | One object: the red cab on its trailer |
-| `sims/port-style/` | The same port in 9 looks (`{"style": "lowpoly"}` … `blueprint`, `twin`, `semireal`, `cel`, `mono`, `voxel`, `map2d`, `diorama`) |
 | `sims/run-collide.mjs` | Runs a `*-collide` page headless and prints the hits |
-| `sims/style-sheet.mjs` | Lays the style stills out as one comparison sheet |
+
+The look is the toy style of the kit (bevelled, matte, pastel); it stays the basis of the project.
 
 Changes to the shared kit: `airport-shared/gse.js` exports its geometry helpers; `airport-shared/select.js` draws the
 route ribbon double-sided (it was culled from above).
@@ -66,6 +66,6 @@ After changing code: build again and refresh. The MP4 only changes when it is ca
 - `port-bench` has no free camera yet.
 - No sound for Portline yet (needs Python 3 and a `score.py` like the other systems).
 - Ideas discussed: a reference-driven pass on proportions (STS crane, reach stacker, RTG spec sheets), a Tanjung Priok
-  layout (one terminal in detail, the rest of the port as a simple backdrop), and applying one of the `port-style` looks.
+  layout (one terminal in detail, the rest of the port as a simple backdrop).
 - The collision sweep uses whole-body boxes: a tall cab over a low chassis can report a contact that is not there.
   Check such pairs on a close-up (`port-look` + a capture config) before adding them to the allowed list.

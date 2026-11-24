@@ -4,7 +4,9 @@
 // World frame used by the port: x along the quay, the quay edge at z = QUAY_Z, water toward -z, the land toward +z.
 // The quay top is y = 0, the water surface y = WATER.
 //
-//   buildToyQuay({x0, x1})            -> {group}       quay wall, cope line, fenders, bollards, the crane rails, water
+//   buildToyWater({w, d, cx, cz})     -> {group, tick(t)} the layered see-through water with drifting ripples
+//   buildToyQuay({x0, x1})            -> {group, tick(t)} quay wall, cope line, fenders, bollards, the crane rails, water;
+//                                        tick(t) moves the ripples (a pure function of t)
 //   buildToyQuayCrane({number})       -> {group, setTrolley(z), setHoist(y), setBoom(k), head()}
 //                                        local: legs at x +-9, landside rail z = +10, waterside rail z = -10, boom over -z
 //   buildToyShip({name})              -> {group, deckY, hatchY, bays, rows, bitts}   origin on the waterline, bow +x
@@ -17,6 +19,7 @@ import * as THREE from 'three';
 import {TOY, toyMat} from '../airport-shared/style.js';
 import {Parts, tpl, part, mats, extrude, cylG, textTex, decalMat, canvasTex, drawMark, LIVERY, sphere} from '../airport-shared/gse.js';
 import {spreaderGeo, BOX} from './vehicles.js';
+import {logoPlate} from './logos.js';
 
 const PI = Math.PI;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -24,10 +27,12 @@ const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
 const paint = (c, r = 0.5) => toyMat(c, {paint: true, rough: r});
 
 export const QUAY_Z = -40;
-export const WATER = -2.6;
+// the water 4.2 m under the quay top (a real container quay stands 3-5 m above the water)
+export const WATER = -4.2;
 export const PORT_COLORS = {
   water: '#a3bbf3',
-  waterDeep: '#93adef',
+  waterDeep: '#7f9ce8',
+  waterFloor: '#5f7fd6',
   concrete: '#c6d0ef',
   cope: '#f2b33a',
   rail: '#5d6888',
@@ -39,35 +44,122 @@ export const PORT_COLORS = {
 const PC = PORT_COLORS;
 
 // ================================================================ the quay and the water
+/** the water, w x d centred on (cx, cz): see buildToyQuay. Returns {group, tick(t)} */
+export function buildToyWater({w = 2400, d = 900, cx = 0, cz = QUAY_Z - 450} = {}) {
+  const group = new THREE.Group();
+  // the water, see-through near the top: an opaque deep floor 5 m down, three thin tinted layers between it and the
+  // surface so a hull fades bluer the deeper it goes, the surface itself half clear, and a soft swell and glint texture
+  // over it that drifts with t
+  const plane = (y, mat, shadow = false) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d).rotateX(-PI / 2), mat);
+    m.position.set(cx, y, cz);
+    m.receiveShadow = shadow;
+    m.renderOrder = 1;
+    group.add(m);
+    return m;
+  };
+  const tint = (color, opacity) => new THREE.MeshStandardMaterial({color, roughness: 0.4, transparent: true, opacity, depthWrite: false});
+  plane(WATER - 5, new THREE.MeshStandardMaterial({color: PC.waterFloor, roughness: 0.9}));
+  for (const [i, d] of [3.6, 2.2, 1.0].entries()) plane(WATER - d, tint(PC.waterDeep, 0.3 + i * 0.04)).renderOrder = 1 + i;
+  plane(WATER, tint(PC.water, 0.5), true).renderOrder = 5;
+  // the surface texture, two tiling layers (every mark is drawn wrapped so the tile has no seam):
+  // swell = broad soft patches a little lighter and darker than the water, so it never reads as one flat colour;
+  // glints = fine soft highlights of many lengths and strengths, the sun catching the wave crests
+  const wrap = (w, h, x, y, r, draw) => {
+    for (const ox of [-w, 0, w]) for (const oy of [-h, 0, h]) {
+      if (x + ox + r < 0 || x + ox - r > w || y + oy + r < 0 || y + oy - r > h) continue;
+      draw(x + ox, y + oy);
+    }
+  };
+  const swellTex = canvasTex('water-swell', 512, 512, (g, w, h) => {
+    g.clearRect(0, 0, w, h);
+    let s = 31;
+    const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+    for (let i = 0; i < 46; i++) {
+      const x = rnd() * w, y = rnd() * h, r = 40 + rnd() * 110;
+      const light = rnd() > 0.5;
+      const a = 0.05 + rnd() * 0.07;
+      wrap(w, h, x, y, r, (px, py) => {
+        const gr = g.createRadialGradient(px, py, 0, px, py, r);
+        gr.addColorStop(0, light ? `rgba(225,235,255,${a})` : `rgba(70,95,190,${a})`);
+        gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr;
+        g.save();
+        g.translate(px, py);
+        g.scale(1.8, 1); // stretched along the wind
+        g.translate(-px, -py);
+        g.beginPath();
+        g.arc(px, py, r, 0, PI * 2);
+        g.fill();
+        g.restore();
+      });
+    }
+  }, {repeat: true});
+  const glintTex = (key, seed, n, alpha) => canvasTex(key, 512, 512, (g, w, h) => {
+    g.clearRect(0, 0, w, h);
+    let s = seed;
+    const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+    g.lineCap = 'round';
+    g.filter = 'blur(1.2px)';
+    // crests cluster loosely along wave rows; each is a small curved arc that thins out at both ends
+    const rows = Array.from({length: 9}, () => rnd() * h);
+    for (let i = 0; i < n; i++) {
+      const x = rnd() * w;
+      const y = rows[Math.floor(rnd() * rows.length)] + (rnd() - 0.5) * 34 + Math.sin(x / 40) * 6;
+      const k = rnd();
+      const l = 5 + k * k * 22; // mostly short, a few long
+      const bend = -l * (0.18 + rnd() * 0.22); // arched like a crest
+      const a = alpha * (0.2 + rnd() * 0.8);
+      const lw = 0.8 + rnd() * 1.6;
+      const col = rnd() > 0.3 ? '255,255,255' : '160,185,245';
+      wrap(w, h, x, y, l + 6, (px, py) => {
+        // a wide faint stroke and a narrow brighter one shorter in the middle: the arc tapers at its ends
+        for (const [f, wd, aa] of [[0, lw, a * 0.55], [0.22, lw * 0.6, a]]) {
+          g.lineWidth = wd;
+          g.strokeStyle = `rgba(${col},${aa})`;
+          g.beginPath();
+          g.moveTo(px + l * f, py + bend * f * 1.6);
+          g.quadraticCurveTo(px + l / 2, py + bend, px + l * (1 - f), py + bend * f * 1.6);
+          g.stroke();
+        }
+      });
+    }
+  }, {repeat: true});
+  const mats = [];
+  const layer = (tex, rw, rd, y, order, opacity) => {
+    tex.repeat.set(w / rw, d / rd);
+    const mat = new THREE.MeshBasicMaterial({map: tex, transparent: true, depthWrite: false, opacity});
+    mats.push(mat);
+    plane(WATER + y, mat).renderOrder = order;
+    return tex;
+  };
+  // the speeds follow the ship foam (buildWaterline runs its foam along the hull at ~0.8 m/s and pulses every ~5 s):
+  // the near crests drift at that speed, the second wave train a little slower at an angle, the broad swell at half,
+  // and the crests brighten and fade on the foam's beat, the two trains out of step, so the water and foam move as one
+  const swell = layer(swellTex, 420, 300, 0.015, 6, 1);
+  const g1 = layer(glintTex('water-glint-a', 7, 170, 0.6), 70, 52, 0.025, 7, 0.85);
+  const g2 = layer(glintTex('water-glint-b', 19, 120, 0.4), 53, 41, 0.03, 8, 0.7);
+  g2.rotation = 0.45; // a second wave train at an angle, so the crests don't all line up
+  const v = (mps, tile) => mps / tile; // metres per second -> texture repeats per second
+  const tick = (t) => {
+    swell.offset.set(t * v(0.4, 420), t * v(0.25, 300));
+    g1.offset.set(t * v(0.8, 70), t * v(0.5, 52));
+    g2.offset.set(0.37 - t * v(0.6, 53), 0.21 + t * v(0.45, 41));
+    mats[1].opacity = 0.85 * (0.8 + 0.2 * Math.sin(t * 1.25));
+    mats[2].opacity = 0.7 * (0.8 + 0.2 * Math.sin(t * 1.25 + 2.1));
+  };
+  tick(0);
+  return {group, tick};
+}
+
 export function buildToyQuay({x0 = -170, x1 = 170, railZ = [-36, -16]} = {}) {
   const M = mats();
   const group = new THREE.Group();
   const L = x1 - x0;
   const cx = (x0 + x1) / 2;
-  // the water: a big plane with soft wave dashes
-  const waterTex = canvasTex('water', 512, 512, (g, w, h) => {
-    g.fillStyle = PC.water;
-    g.fillRect(0, 0, w, h);
-    let s = 7;
-    const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
-    for (let i = 0; i < 70; i++) {
-      const x = rnd() * w;
-      const y = rnd() * h;
-      const l = 14 + rnd() * 30;
-      g.strokeStyle = rnd() > 0.5 ? 'rgba(255,255,255,0.55)' : 'rgba(120,145,220,0.35)';
-      g.lineWidth = 3;
-      g.lineCap = 'round';
-      g.beginPath();
-      g.moveTo(x, y);
-      g.quadraticCurveTo(x + l / 2, y - 4, x + l, y);
-      g.stroke();
-    }
-  }, {repeat: true});
-  waterTex.repeat.set(30, 12);
-  const water = new THREE.Mesh(new THREE.PlaneGeometry(2400, 900).rotateX(-PI / 2), new THREE.MeshStandardMaterial({map: waterTex, roughness: 0.35, metalness: 0.0}));
-  water.position.set(0, WATER, QUAY_Z - 450);
-  water.receiveShadow = true;
-  group.add(water);
+  const water = buildToyWater();
+  group.add(water.group);
+  const tick = water.tick;
   tpl(`quay|${x0}|${x1}`, (P) => {
     const conc = toyMat(PC.concrete, {rough: 0.9});
     // the wall face down into the water, the cope beam, the yellow edge line
@@ -91,7 +183,7 @@ export function buildToyQuay({x0 = -170, x1 = 170, railZ = [-36, -16]} = {}) {
     P.ext(toyMat(PC.cope, {rough: 0.7}), x0, x1, 0.02, 0.06, railZ[1] + 1.3, railZ[1] + 1.55, 0.01);
     P.ext(toyMat(PC.cope, {rough: 0.7}), x0, x1, 0.02, 0.06, railZ[0] - 1.55, railZ[0] - 1.3, 0.01);
   }, group);
-  return {group, length: L, cx};
+  return {group, length: L, cx, tick};
 }
 
 /** a mooring rope from a to b (world points), sagging a little */
@@ -110,14 +202,18 @@ export const QC = {top: 21, gird: 22.6, apex: 36, outreach: -56, back: 24, legX:
  *  forestays to the boom tip and backstays to the backreach, the machinery house on the backreach, the trolley with the
  *  operator's cab under it, a headblock and a yellow 40 ft spreader on 4 ropes. The outreach boom hinges up at the
  *  waterside leg (setBoom(1) = stowed, nearly vertical). setTrolley(z) in local z, setHoist(y) the spreader's underside. */
-export function buildToyQuayCrane({number = '02'} = {}) {
+export function buildToyQuayCrane({number = '02', lift = 0} = {}) {
   const M = mats();
   const group = new THREE.Group();
-  const {top, gird, apex, outreach, back, legX, rail} = QC;
+  // lift raises the portal, the girders and the A-frame (a taller crane for bigger ships); 0 = the film's crane
+  const {outreach, back, legX, rail} = QC;
+  const top = QC.top + lift;
+  const gird = QC.gird + lift;
+  const apex = QC.apex + lift;
   const white = M.white;
   const blue = paint(TOY.blue, 0.46);
   const deep = paint(TOY.blueDeep, 0.5);
-  tpl(`qc|${number}`, (P) => {
+  tpl(`qc|${number}${lift ? '|' + lift : ''}`, (P) => {
     // the bogies and the sill beams along the rails
     for (const z of [-rail, rail]) {
       P.ext(blue, -legX - 2.6, legX + 2.6, 0.9, 2.3, z - 0.9, z + 0.9, 0.3);
@@ -128,6 +224,7 @@ export function buildToyQuayCrane({number = '02'} = {}) {
     for (const xs of [-1, 1]) {
       for (const z of [-rail, rail]) P.bar(white, [xs * legX, 2.2, z], [xs * legX, top, z], 1.5);
       P.bar(white, [xs * legX, 14.0, -rail], [xs * legX, 14.0, rail], 0.9);
+      if (lift > 6) P.bar(white, [xs * legX, 14.0 + lift * 0.6, -rail], [xs * legX, 14.0 + lift * 0.6, rail], 0.8);
       P.bar(white, [xs * legX, top - 0.6, -rail], [xs * legX, top - 0.6, rail], 1.3);
     }
     for (const z of [-rail, rail]) P.bar(white, [-legX, top - 0.4, z], [legX, top - 0.4, z], 1.2);
@@ -137,7 +234,7 @@ export function buildToyQuayCrane({number = '02'} = {}) {
     // the machinery house on the backreach, blue roof band, the brand
     P.ext(white, -4.2, 4.2, gird + 0.6, gird + 5.2, back - 10, back - 0.6, 0.4);
     P.ext(blue, -4.3, 4.3, gird + 4.8, gird + 5.5, back - 10.1, back - 0.5, 0.2);
-    for (const s of [-1, 1]) P.text('PORTLINE', {fg: TOY.blue, px: 120}, 1.1, s * 4.22, gird + 3.0, back - 5.3, s * PI / 2);
+    for (const s of [-1, 1]) logoPlate(P, 'blue', 1.0, s * 4.22, gird + 3.0, back - 5.3, s * PI / 2);
     P.text(`QC ${number}`, {fg: '#1d2748', px: 120}, 1.0, 0, gird + 3.0, back - 0.58);
     // the A-frame over the waterside legs, backstays down to the backreach end
     for (const xs of [-1, 1]) {
@@ -236,80 +333,8 @@ export function buildToyQuayCrane({number = '02'} = {}) {
 }
 
 // ================================================================ the container ship
-/** a toy feeder-to-mainline container ship: a navy hull with a white sheer stripe and the name at the bow and stern,
- *  a raised forecastle with a mast, hatch covers per bay with lashing bridges between them, the accommodation block
- *  aft with full-width bridge wings and a funnel with the line's mark. The deck cargo is placed by the world (it is
- *  instanced with the yard). Origin on the waterline, bow toward +x, the quay side +z. */
-export const SHIP = {L: 214, B: 32, deck: 7.6, hatch: 8.3, x0: -100, x1: 114, bayL: 17};
-export function buildToyShip({name = 'AURORA MERIDIAN', port = 'NORTHBAY'} = {}) {
-  const M = mats();
-  const group = new THREE.Group();
-  const {B, deck, hatch, x0, x1, bayL} = SHIP;
-  const hb = B / 2;
-  const plan = () => {
-    const s = new THREE.Shape();
-    s.moveTo(x0 + 2, -hb);
-    s.lineTo(x1 - 34, -hb);
-    s.bezierCurveTo(x1 - 12, -hb, x1 - 2, -hb * 0.5, x1, 0);
-    s.bezierCurveTo(x1 - 2, hb * 0.5, x1 - 12, hb, x1 - 34, hb);
-    s.lineTo(x0 + 2, hb);
-    s.quadraticCurveTo(x0, hb, x0, hb - 2);
-    s.lineTo(x0, -hb + 2);
-    s.quadraticCurveTo(x0, -hb, x0 + 2, -hb);
-    return s;
-  };
-  const bays = [];
-  for (let x = x0 + 34; x + bayL / 2 < x1 - 22; x += bayL + 1) bays.push(x + bayL / 2);
-  const rows = Array.from({length: 9}, (_, i) => (i - 4) * 3.5);
-  tpl(`ship|${name}`, (P) => {
-    const hull = paint(PC.hull, 0.5);
-    const H = deck + 6;
-    P.add(hull, extrude('ship-hull', plan, H, 0.6), 0, deck - H / 2, 0, -PI / 2, 0, 0);
-    // the sheer stripe and the deck edge
-    P.add(paint(PC.boot, 0.5), extrude('ship-stripe', plan, 0.5, 0.2), 0, deck - 1.1, 0, -PI / 2, 0, 0, 1.003, 1.012, 1);
-    P.add(toyMat('#d5ddf5', {rough: 0.8}), extrude('ship-deck', plan, 0.3, 0.1), 0, deck + 0.02, 0, -PI / 2, 0, 0, 0.99, 0.96, 1);
-    // the forecastle and its mast
-    P.ext(hull, x1 - 26, x1 - 8, deck, deck + 2.6, -hb * 0.62, hb * 0.62, 0.5);
-    P.ext(M.white, x1 - 25.5, x1 - 22, deck + 2.5, deck + 3.0, -hb * 0.55, hb * 0.55, 0.15);
-    P.cyl(M.white, 0.35, 0.35, 9, x1 - 14, deck + 7, 0, 'y', 12);
-    P.ext(M.white, x1 - 14.3, x1 - 13.7, deck + 9.5, deck + 9.8, -2.2, 2.2, 0.05);
-    // hatch covers per bay, lashing bridges between the bays
-    for (const bx of bays) {
-      P.ext(toyMat('#5d6c9c', {rough: 0.6}), bx - bayL / 2 + 0.3, bx + bayL / 2 - 0.3, deck, hatch, -hb + 1.6, hb - 1.6, 0.2);
-      for (const z of [-hb / 3, 0, hb / 3]) P.ext(toyMat('#4f5e8e', {rough: 0.6}), bx - bayL / 2 + 0.3, bx + bayL / 2 - 0.3, hatch - 0.02, hatch + 0.02, z - 0.08, z + 0.08, 0.01);
-      const lx = bx + bayL / 2 + 0.5;
-      for (const z of [-hb + 1.4, hb - 1.4]) P.bar(M.white, [lx, deck, z], [lx, deck + 3.8, z], 0.3);
-      P.ext(M.white, lx - 0.25, lx + 0.25, deck + 3.6, deck + 3.9, -hb + 1.3, hb - 1.3, 0.06);
-    }
-    // the accommodation block aft: 6 decks, window bands, full-width bridge wings, the funnel behind
-    const ax0 = x0 + 6;
-    const ax1 = x0 + 22;
-    P.ext(M.white, ax0, ax1, deck, deck + 17, -hb * 0.62, hb * 0.62, 0.6);
-    for (let k = 0; k < 5; k++) P.ext(M.glass, ax1 - 0.05, ax1 + 0.06, deck + 2.6 + k * 2.8, deck + 3.7 + k * 2.8, -hb * 0.5, hb * 0.5, 0.1);
-    for (let k = 0; k < 5; k++) for (const s of [-1, 1]) P.ext(M.glass, ax0 + 2, ax1 - 2, deck + 2.6 + k * 2.8, deck + 3.7 + k * 2.8, s * hb * 0.62 - 0.06, s * hb * 0.62 + 0.06, 0.1);
-    P.ext(M.white, ax0 + 3, ax1 + 1, deck + 17, deck + 20.5, -hb - 0.6, hb + 0.6, 0.4);
-    P.ext(M.glass, ax1 + 0.9, ax1 + 1.06, deck + 18.0, deck + 19.8, -hb * 0.9, hb * 0.9, 0.08);
-    P.ext(paint(TOY.blue, 0.46), ax0 + 3, ax1 + 1, deck + 20.4, deck + 21.0, -hb - 0.6, hb + 0.6, 0.15);
-    P.cyl(M.white, 0.25, 0.25, 6, ax0 + 9, deck + 24, 0, 'y', 10);
-    P.ext(M.white, ax0 + 8.6, ax0 + 9.4, deck + 25.5, deck + 25.8, -3, 3, 0.05);
-    P.ext(paint(TOY.blue, 0.46), ax0 - 4.5, ax0 + 1.5, deck + 8, deck + 21, -3.2, 3.2, 0.8);
-    P.ext(M.ink, ax0 - 4.3, ax0 + 1.3, deck + 20.6, deck + 21.1, -2.8, 2.8, 0.2);
-    // the line's mark on the funnel, the name at the bow and the stern, draught marks
-    const L = LIVERY.aurora;
-    const markTex = canvasTex('funnel-mark', 256, 256, (g, w) => drawMark(g, 'aurora', 20, 20, w - 40, {...L, accent: '#ffffff', light: '#ffffff', deep: '#ffffff'}));
-    for (const s of [-1, 1]) P.print(decalMat(markTex), 4.2, 4.2, ax0 - 1.5, deck + 15.5, s * 3.22, s > 0 ? 0 : PI);
-    for (const s of [-1, 1]) {
-      P.text(name, {fg: '#ffffff', px: 120}, 1.6, x1 - 30, deck - 2.6, s * (hb + 0.08), s > 0 ? 0 : PI);
-      P.text('AURORA LINE', {fg: '#ffffff', px: 120}, 3.0, 0, deck - 3.2, s * (hb + 0.08), s > 0 ? 0 : PI);
-    }
-    P.text(name, {fg: '#ffffff', px: 110}, 1.2, x0 - 0.1, deck - 2.4, 0, -PI / 2);
-    P.text(port, {fg: '#ffffff', px: 110}, 0.9, x0 - 0.1, deck - 4.0, 0, -PI / 2);
-    // bitts along the quay side for the mooring lines
-    for (const bx of [x1 - 20, x1 - 40, x0 + 26, x0 + 6]) P.cyl(M.ink, 0.35, 0.35, 0.9, bx, deck + 0.45, hb - 1.2, 'y', 12);
-  }, group);
-  const bitts = [x1 - 20, x1 - 40, x0 + 26, x0 + 6].map((bx) => V3(bx, deck + 0.8, hb - 1.2));
-  return {group, deckY: deck, hatchY: hatch, bays, rows, bitts};
-}
+// lives in ships.js with the other vessels; re-exported here for the world's imports
+export {SHIP, buildToyShip} from './ships.js';
 
 // ================================================================ the gate complex
 /** the in/out gate: a blue canopy over the lanes on round columns, a white kiosk with glass on each island, a barrier
@@ -327,7 +352,12 @@ export function buildToyGate({lanes = [{z: -2, dir: 1, label: 'OUT 1'}, {z: 2, d
     // the canopy, its fascia with the sign, the columns
     P.ext(M.white, -6, 6, 7.4, 8.2, z0 - 1, z1 + 1, 0.3);
     P.ext(blue, -6.1, 6.1, 8.1, 9.4, z0 - 1.1, z1 + 1.1, 0.35);
-    for (const s of [-1, 1]) P.text(`${name}  ·  PORTLINE`, {fg: '#ffffff', px: 120}, 0.8, s * 6.12, 8.75, (z0 + z1) / 2, s * PI / 2);
+    // the gate's name and the operator's logo (white on the blue fascia), reading left to right from either side
+    for (const s of [-1, 1]) {
+      const zc = (z0 + z1) / 2;
+      P.text(name, {fg: '#ffffff', px: 120}, 0.8, s * 6.12, 8.75, zc + s * 2.2, s * PI / 2);
+      logoPlate(P, 'white', 0.62, s * 6.12, 8.72, zc - s * 1.9, s * PI / 2);
+    }
     for (const z of islands) {
       // the island kerb, the kiosk, the columns
       P.ext(toyMat('#e9edf8', {rough: 0.9}), -9, 9, 0, 0.3, z - 0.9, z + 0.9, 0.12);
@@ -425,7 +455,7 @@ export function buildToyOffice({label = 'NORTHBAY CONTAINER TERMINAL'} = {}) {
     }
     P.ext(paint(TOY.blue, 0.46), -14.2, 14.2, 12.4, 13.2, -8.2, 8.2, 0.25);
     P.ext(M.white, -6, 6, 13.2, 15.4, -1.8, 1.8, 0.2);
-    P.text('PORTLINE', {fg: TOY.blue, px: 120}, 1.4, 0, 14.3, 1.82);
+    logoPlate(P, 'blue', 1.3, 0, 14.3, 1.82);
     P.text(label, {fg: '#1d2748', px: 100}, 0.7, 0, 0.9, 8.08);
     // the entrance canopy
     P.ext(paint(TOY.blue, 0.46), -3.2, 3.2, 3.2, 3.5, 8, 10.6, 0.1);

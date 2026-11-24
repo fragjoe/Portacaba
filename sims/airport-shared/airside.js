@@ -1192,16 +1192,28 @@ function palletStack(K, x, z, seed) {
 }
 /** the reference's wall sign: a white rounded panel, the cube mark, a name in blue and a line under it */
 function signTex(name, sub) {
-  const key = ['sign', name, sub].join('|');
+  // name: the text, or an image (a logo) drawn in its place without the cube mark
+  const img = typeof name === 'string' ? null : name;
+  const key = ['sign', img ? img.src.slice(-48) : name, sub].join('|');
   if (TEX.has(key)) return TEX.get(key);
   const m = document.createElement('canvas').getContext('2d');
+  m.font = FONT(600, 42);
+  const iw = img ? (img.width * 84) / img.height : 0;
   m.font = FONT(800, 92);
-  const w = Math.ceil(m.measureText(name).width + 320);
+  const w = img ? Math.ceil(Math.max(iw, m.measureText(sub).width * 0.5) + 120) : Math.ceil(m.measureText(name).width + 320);
   const h = 200;
   const tex = canvasTex(w, h, (g) => {
     rr(g, 2, 2, w - 4, h - 4, 30);
     g.fillStyle = '#ffffff';
     g.fill();
+    if (img) {
+      g.drawImage(img, 60, 22, iw, 84);
+      g.fillStyle = TOY.blueLight;
+      g.font = FONT(600, 42);
+      g.textBaseline = 'middle';
+      g.fillText(sub, 64, h / 2 + 50);
+      return;
+    }
     drawMark(g, 'cube', 96, h / 2, 70, TOY.blue);
     g.fillStyle = TOY.blue;
     g.font = FONT(800, 92);

@@ -19,9 +19,10 @@ import {buildToyForklift, buildToyFollowMe} from '../airport-shared/gse.js';
 import {
   BOX, CONTAINER_COLORS as CC, buildContainerField, buildToyContainer, buildToyTerminalTractor, buildToyTerminalChassis,
   buildToyPrimeMover, buildToyRedCabTractor, buildToySkeletalTrailer, buildToyReachStacker, buildToyStraddleCarrier, buildToyEmptyHandler, buildToyRTG,
-  buildToyTugboat, buildToyPilotBoat,
 } from './vehicles.js';
-import {QUAY_Z, WATER, SHIP, buildToyQuay, buildToyQuayCrane, buildToyShip, buildToyGate, buildToyReeferRack, buildToyLightMast, buildToyOffice, buildToyMooringLine} from './infra.js';
+import {QUAY_Z, WATER, PORT_COLORS, SHIP, buildToyQuay, buildToyQuayCrane, buildToyShip, buildToyGate, buildToyReeferRack, buildToyLightMast, buildToyOffice, buildToyMooringLine} from './infra.js';
+import {buildToyTugboat, buildToyPilotBoat, buildWaterline} from './ships.js';
+import {LOGOS} from './logos.js';
 
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
 const sm = (x) => {
@@ -52,7 +53,10 @@ const CRANE_Z = -26; // the cranes' local origin: rails at -36 and -16
 const QC_X = [-39.5, 14.5, 68.5];
 const SHIP_Z = -58.5;
 const SHIP_ROWS = Array.from({length: 8}, (_, i) => SHIP_Z + (i - 3.5) * 3.5); // row 7 (index 7) is the quay side
-const HATCH_Y = WATER + SHIP.hatch;
+// the ship rides light, its design waterline 1.6 m over the water, so 2-3 m of red shows; the deck, the hatches and every
+// crane move keep the heights they were timed at
+const SHIP_Y = -2.6;
+const HATCH_Y = SHIP_Y + SHIP.hatch;
 const LANE_B = 31.6; // the truck lane along Block B3's south face
 const SLOT_X = 39; // the hero's bay in B3
 const ROWS_B = [27.0, 23.4, 19.8]; // row 1 is next to lane B
@@ -165,7 +169,14 @@ export function buildWorld() {
   flat(10, 90, road, 114, 13, 0.017); // east aisle
   flat(80, 24, road, 128, 55, 0.017); // gate approach
   flat(260, 24, road, 290, 55, 0.017); // the city road east of the gate
-  flat(12, 500, road, 178, 40, 0.018); // the public road along the fence
+  flat(12, 328, road, 178, 126, 0.018); // the public road along the fence, from the shore (z = -38) inland
+  // the shoreline beyond the terminal's quay: a plain concrete seawall down into the water, so the land has an edge
+  for (const [a, b] of [[-1200, -170], [170, 1200]]) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(b - a, -WATER + 4, 1.4), toyMat(PORT_COLORS.concrete, {rough: 0.9}));
+    wall.position.set((a + b) / 2, (WATER - 4) / 2, QUAY_Z - 0.1);
+    wall.receiveShadow = true;
+    root.add(wall);
+  }
   for (let x = -180; x < 180; x += 9) {
     flat(4, 0.4, TOY.lane, x, -6, 0.03);
     flat(4, 0.4, TOY.lane, x, PERIM_Z, 0.03);
@@ -197,9 +208,16 @@ export function buildWorld() {
   qcs[2].setTrolley(8);
   qcs[2].setHoist(15);
   const ship = buildToyShip();
-  add(ship.group, 0, SHIP_Z, 0, WATER);
+  add(ship.group, 0, SHIP_Z, 0, SHIP_Y);
+  const foam = [];
+  const wl = (o, opts) => {
+    const f = buildWaterline(o, opts);
+    o.group.add(f.mesh);
+    foam.push(f);
+  };
+  wl(ship, {y: WATER - SHIP_Y});
   for (const [i, b] of ship.bitts.entries()) {
-    const a = b.clone().add(V(0, WATER, SHIP_Z));
+    const a = b.clone().add(V(0, SHIP_Y, SHIP_Z));
     const q = V(a.x + (i % 2 ? -9 : 9) * (i < 2 ? 1 : -1), 0.7, QUAY_Z + 0.25);
     root.add(buildToyMooringLine(a, q));
   }
@@ -247,7 +265,7 @@ export function buildWorld() {
   root.add(buildContainerField(field).group);
 
   // ---------------------------------------------------------------- the hero box, TT-07 and its chassis, RS-04
-  const hero = buildToyContainer({color: CC.orange, id: HERO_ID, line: 'CARGOVIVA'});
+  const hero = buildToyContainer({color: CC.orange, id: HERO_ID, logo: 'white'});
   root.add(hero.group);
   const tt7 = buildToyTerminalTractor({number: '07'});
   const ch7 = buildToyTerminalChassis();
@@ -293,7 +311,7 @@ export function buildWorld() {
   const rtg = buildToyRTG({number: '05'});
   root.add(rtg.group);
   const sc = buildToyStraddleCarrier({number: '11'});
-  const scBox = buildToyContainer({color: CC.kestrel, id: 'KSTU 305528 5', line: 'KESTREL'});
+  const scBox = buildToyContainer({color: CC.kestrel, id: 'KSTU 305528 5', logo: 'white'});
   root.add(sc.group, scBox.group);
   sc.setLift(5.2);
   const eh = buildToyEmptyHandler({number: '02'});
@@ -315,7 +333,7 @@ export function buildWorld() {
   add(buildToyOffice().group, 138, 10, 0);
   add(buildToyFollowMe().group, 121, 24, 0.2);
   for (const [x, z] of [[-70, 8], [-30, 51.5], [100, 8], [62, 65], [100, 80], [-100, 64.5]]) add(buildToyLightMast().group, x, z);
-  const cfs = buildToyCargoTerminal({docks: 4, stock: true, name: 'CFS', sign: ['PORTLINE', 'CFS  ·  Container Freight Station']});
+  const cfs = buildToyCargoTerminal({docks: 4, stock: true, name: 'CFS', sign: [LOGOS.blue, 'CFS  ·  Container Freight Station']});
   add(cfs.group, -150, 52);
   for (let i = 0; i < 4; i++) cfs.setDoor(i, i === 1 ? 1 : 0);
   const cfsFl = buildToyForklift();
@@ -328,6 +346,9 @@ export function buildWorld() {
   add(tug2.group, 140, -96, Math.PI, WATER);
   const pilot = buildToyPilotBoat();
   add(pilot.group, 0, -120, Math.PI, WATER);
+  wl(tug1);
+  wl(tug2, {wake: 40});
+  wl(pilot, {wake: 34});
 
   // ---------------------------------------------------------------- fence, trees, the city
   for (let x = -200; x < 152; x += 30) add(buildToyFence({length: 30}), x + 15, 88);
@@ -495,6 +516,8 @@ export function buildWorld() {
       placeBox(ehBox, -60.2, lift - BOX.H, z - 5.1, 0);
     }
     // ---- the water
+    quay.tick(t);
+    for (const f of foam) f.tick(t);
     tug1.bob(t);
     tug2.bob(t + 2);
     pilot.bob(t);

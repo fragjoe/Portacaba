@@ -6,7 +6,8 @@
 // Scale contract (shared with infra.js): a 40 ft box is 16.0 x 3.6 x 3.4 (L x H x W), a 20 ft box 8.0; chassis decks at
 // y = 1.5, so a box on a chassis tops out at 5.1. Every mover returns {group, roll(d), ...}.
 //
-//   buildToyContainer({len, color, id, line, reefer})     -> {group, len, H, W}          origin: bottom centre
+//   buildToyContainer({len, color, id, line, logo, reefer}) -> {group, len, H, W}        origin: bottom centre;
+//                                        logo: 'white' prints the Koneksea logo in place of the line's name
 //   buildContainerField(list)                              -> {group, count}             instanced stacks
 //   buildToyTerminalTractor({number})                      -> {group, roll, setSteer, fifth}   yard truck, 6.4 m
 //   buildToyTerminalChassis()                              -> {group, roll, kingpin, deckY, len}  16.8 m, kingpin local x
@@ -20,6 +21,7 @@
 import * as THREE from 'three';
 import {TOY, toyMat} from '../airport-shared/style.js';
 import {Parts, tpl, part, axle, roller, steerer, mats, cab, extrude, profile, rb, cylG, textTex, decalMat, canvasTex, LIVERY, ram} from '../airport-shared/gse.js';
+import {logoPlate} from './logos.js';
 
 const PI = Math.PI;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -42,7 +44,7 @@ const LINES = {aurora: 'AURORA LINE', kestrel: 'KESTREL', navy: 'NORTHBAY', whit
 // ================================================================ the container (a detailed one: the hero and the movers)
 /** a corrugated ISO box: ribbed sides, top and bottom rails, 8 corner castings, doors with 4 lock rods at -x, the BIC
  *  code on the sides and doors, the line's name on the sides. reefer: a white machinery front with a grille at +x. */
-export function buildToyContainer({len = BOX.L40, color = TOY.blue, id = 'AURU 482113 9', line = 'AURORA LINE', reefer = false} = {}) {
+export function buildToyContainer({len = BOX.L40, color = TOY.blue, id = 'AURU 482113 9', line = 'AURORA LINE', logo = null, reefer = false} = {}) {
   const M = mats();
   const group = new THREE.Group();
   const H = BOX.H;
@@ -51,7 +53,7 @@ export function buildToyContainer({len = BOX.L40, color = TOY.blue, id = 'AURU 4
   const hw = W / 2;
   const body = paint(color, 0.58);
   const deep = paint(new THREE.Color(color).multiplyScalar(0.78).getStyle(), 0.6);
-  tpl(`box|${len}|${color}|${id}|${line}|${reefer}`, (P) => {
+  tpl(`box|${len}|${color}|${id}|${line}|${logo}|${reefer}`, (P) => {
     P.ext(body, -hl + 0.12, hl - 0.12, 0.18, H - 0.14, -hw + 0.06, hw - 0.06, 0.08);
     // corrugation: vertical ribs proud of each side
     const n = Math.floor((len - 0.8) / 0.62);
@@ -88,7 +90,8 @@ export function buildToyContainer({len = BOX.L40, color = TOY.blue, id = 'AURU 4
       P.ext(toyMat('#22b35f', {emissive: '#22b35f'}), hl + 0.06, hl + 0.12, 2.3, 2.5, 0.6, 1.0, 0.03);
     }
     // prints: the line on both sides, the BIC code top right on the sides and on the doors
-    if (line) for (const s of [-1, 1]) P.text(line, {fg: '#ffffff', px: 110}, Math.min(0.9, len * 0.06), s > 0 ? -len * 0.08 : len * 0.08, H * 0.52, s * (hw + 0.035), s > 0 ? 0 : PI);
+    if (logo) for (const s of [-1, 1]) logoPlate(P, logo, Math.min(0.75, len * 0.05), s > 0 ? -len * 0.08 : len * 0.08, H * 0.52, s * (hw + 0.035), s > 0 ? 0 : PI);
+    else if (line) for (const s of [-1, 1]) P.text(line, {fg: '#ffffff', px: 110}, Math.min(0.9, len * 0.06), s > 0 ? -len * 0.08 : len * 0.08, H * 0.52, s * (hw + 0.035), s > 0 ? 0 : PI);
     for (const s of [-1, 1]) P.text(id, {fg: '#ffffff', px: 80}, 0.34, s > 0 ? hl - 2.0 : -hl + 2.0, H - 0.55, s * (hw + 0.035), s > 0 ? 0 : PI);
     P.text(id, {fg: '#ffffff', px: 80}, 0.3, -hl - 0.15, H - 0.6, 0.7, -PI / 2);
     P.text(reefer ? '45R1' : len > 10 ? '45G1' : '22G1', {fg: '#ffffff', px: 80}, 0.26, -hl - 0.15, H - 0.95, 0.7, -PI / 2);
@@ -626,88 +629,6 @@ export function buildToyRTG({number = '05'} = {}) {
   };
   sync();
   return {group, roll: (d) => {for (const w of wheels) w.rotation.z = -d / 0.6;}, setTrolley, setHoist, span, length: 2 * hx + 2.4};
-}
-
-// ================================================================ harbour craft
-/** a harbour tug: a rounded hull with a rubber fender belt and push knees at the bow, a high wheelhouse with glass all
- *  round, a mast, towing bitts aft. Floats: origin at the waterline. bob(t) rocks it a touch. */
-export function buildToyTugboat({name = 'NB TUG 3'} = {}) {
-  const M = mats();
-  const group = new THREE.Group();
-  const body = new THREE.Group();
-  group.add(body);
-  const hullShape = () => {
-    const s = new THREE.Shape();
-    s.moveTo(-6.5, -2.6);
-    s.lineTo(3.0, -2.6);
-    s.quadraticCurveTo(7.6, -2.4, 8.0, 0);
-    s.quadraticCurveTo(7.6, 2.4, 3.0, 2.6);
-    s.lineTo(-6.5, 2.6);
-    s.quadraticCurveTo(-7.4, 2.6, -7.4, 1.6);
-    s.lineTo(-7.4, -1.6);
-    s.quadraticCurveTo(-7.4, -2.6, -6.5, -2.6);
-    return s;
-  };
-  tpl(`tug|${name}`, (P) => {
-    // the hull as a plan-view shape extruded up (rotated so the extrusion runs along y)
-    const g = extrude('tug-hull', hullShape, 2.6, 0.3);
-    P.add(paint(TOY.blue, 0.46), g, 0, 0.4, 0, -PI / 2, 0, 0);
-    P.add(toyMat('#1f2433', {rough: 0.8}), extrude('tug-belt', hullShape, 0.7, 0.3), 0, 1.45, 0, -PI / 2, 0, 0, 1.04, 1.06, 1);
-    P.add(M.white, extrude('tug-deck', hullShape, 0.2, 0.05), 0, 1.75, 0, -PI / 2, 0, 0, 0.94, 0.9, 1);
-    // wheelhouse, its glass band, roof, mast
-    P.ext(M.white, -2.5, 2.2, 1.7, 4.3, -1.8, 1.8, 0.3);
-    P.ext(M.white, -1.6, 1.8, 4.1, 6.4, -1.5, 1.5, 0.25);
-    P.ext(M.glass, -1.68, 1.88, 5.0, 6.05, -1.56, 1.56, 0.12);
-    P.ext(paint(TOY.blue, 0.46), -1.8, 2.0, 6.3, 6.6, -1.7, 1.7, 0.1);
-    P.cyl(M.ink, 0.08, 0.08, 3.0, 0.0, 8.0, 0, 'y', 8);
-    P.ext(M.ink, -0.1, 0.1, 8.4, 8.55, -0.9, 0.9, 0.03);
-    P.cyl(paint(TOY.blue, 0.4), 0.45, 0.55, 1.6, -3.4, 4.4, 0, 'y', 16);
-    // push knees and towing bitts
-    for (const s of [-1, 1]) P.ext(toyMat('#1f2433', {rough: 0.8}), 7.2, 8.2, 0.6, 2.6, s * 0.9 - 0.35, s * 0.9 + 0.35, 0.15);
-    P.cyl(M.ink, 0.25, 0.25, 0.8, -5.2, 2.2, 0, 'y', 12);
-    P.text(name, {fg: '#ffffff', px: 110}, 0.55, 1.0, 1.0, 2.62);
-    P.text(name, {fg: '#ffffff', px: 110}, 0.55, 1.0, 1.0, -2.62, PI);
-  }, body);
-  const bob = (t) => {
-    body.position.y = 0.12 * Math.sin(t * 1.7);
-    body.rotation.x = 0.015 * Math.sin(t * 1.3);
-    body.rotation.z = 0.01 * Math.sin(t * 1.1 + 1);
-  };
-  bob(0);
-  return {group, bob, length: 15.4};
-}
-
-/** the pilot boat: small, fast, orange superstructure (pilot boats are painted to be seen), PILOT on the cabin */
-export function buildToyPilotBoat() {
-  const M = mats();
-  const group = new THREE.Group();
-  const body = new THREE.Group();
-  group.add(body);
-  const shape = () => {
-    const s = new THREE.Shape();
-    s.moveTo(-4.0, -1.6);
-    s.lineTo(1.5, -1.6);
-    s.quadraticCurveTo(5.0, -1.2, 5.6, 0);
-    s.quadraticCurveTo(5.0, 1.2, 1.5, 1.6);
-    s.lineTo(-4.0, 1.6);
-    s.lineTo(-4.0, -1.6);
-    return s;
-  };
-  tpl('pilot', (P) => {
-    P.add(M.white, extrude('pilot-hull', shape, 1.6, 0.22), 0, 0.3, 0, -PI / 2, 0, 0);
-    P.add(toyMat('#1f2433', {rough: 0.8}), extrude('pilot-belt', shape, 0.4, 0.15), 0, 1.0, 0, -PI / 2, 0, 0, 1.05, 1.08, 1);
-    P.add(M.white, extrude('pilot-deck', shape, 0.16, 0.05), 0, 1.22, 0, -PI / 2, 0, 0, 0.95, 0.9, 1);
-    P.ext(paint(TOY.orange, 0.46), -1.8, 1.8, 1.25, 3.3, -1.2, 1.2, 0.3);
-    P.ext(M.glass, -1.5, 1.9, 2.4, 3.1, -1.25, 1.25, 0.1);
-    P.ext(M.white, -1.9, 1.9, 3.25, 3.45, -1.25, 1.25, 0.08);
-    P.text('PILOT', {fg: '#ffffff', px: 120}, 0.42, -0.3, 1.95, 1.22);
-    P.text('PILOT', {fg: '#ffffff', px: 120}, 0.42, -0.3, 1.95, -1.22, PI);
-  }, body);
-  const bob = (t) => {
-    body.position.y = 0.1 * Math.sin(t * 2.1);
-    body.rotation.x = 0.02 * Math.sin(t * 1.6);
-  };
-  return {group, bob, length: 9.6};
 }
 
 export {spreaderGeo, decalMat, textTex};

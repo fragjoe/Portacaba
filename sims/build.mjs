@@ -104,7 +104,7 @@ for (const arg of names) {
     write: false,
     target: 'es2022',
     legalComments: 'none',
-    loader: {'.glb': 'base64', '.woff2': 'base64'},
+    loader: {'.glb': 'base64', '.woff2': 'base64', '.webp': 'dataurl'},
     logLevel: 'warning',
   });
   const js = res.outputFiles[0].text.replace(/<\/script/g, '<\\/script');

@@ -8,7 +8,7 @@
 //
 //   buildToyContainer({len, color, id, line, logo, reefer}) -> {group, len, H, W}        origin: bottom centre;
 //                                        logo: 'white' prints the Koneksea logo in place of the line's name
-//   buildContainerField(list)                              -> {group, count}             instanced stacks
+//   buildContainerField(list)                              -> {group, count, setVisible(i, on)}  instanced stacks
 //   buildToyTerminalTractor({number})                      -> {group, roll, setSteer, fifth}   yard truck, 6.4 m
 //   buildToyTerminalChassis()                              -> {group, roll, kingpin, deckY, len}  16.8 m, kingpin local x
 //   buildToyPrimeMover({livery, number})                   -> {group, roll, setSteer, fifth}   road tractor, 7.6 m
@@ -16,7 +16,7 @@
 //   buildToyReachStacker({number})                         -> {group, roll, reach(x, y), tip()} spreader bottom target (local)
 //   buildToyStraddleCarrier({number})                      -> {group, roll, setLift(y)}   spreader bottom y
 //   buildToyEmptyHandler({number})                         -> {group, roll, setLift(y)}   top-lift frame bottom y
-//   buildToyRTG({number})                                  -> {group, roll, setTrolley(z), setHoist(y)}  spans local z +-11
+//   buildToyRTG({number, span})                            -> {group, roll, setTrolley(z), setHoist(y)}  spans local z +-span (11)
 //   buildToyTugboat({name}), buildToyPilotBoat()           -> {group, bob(t)}
 import * as THREE from 'three';
 import {TOY, toyMat} from '../airport-shared/style.js';
@@ -118,11 +118,13 @@ export function buildContainerField(list) {
     g.fillRect(0, h - 5, w, 5);
   });
   const byLen = new Map();
-  for (const b of list) {
+  list.forEach((b, i) => {
     const k = b.len > 10 ? 40 : 20;
     if (!byLen.has(k)) byLen.set(k, []);
-    byLen.get(k).push(b);
-  }
+    byLen.get(k).push({...b, src: i});
+  });
+  // where each box of the list went: its instanced mesh and index, the rail mesh, its matrix (for setVisible)
+  const where = new Array(list.length);
   const m4 = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const e = new THREE.Euler();
@@ -139,6 +141,7 @@ export function buildContainerField(list) {
       m4.compose(V3(b.x, (b.y ?? 0) + BOX.H / 2, b.z), q, V3(1, 1, 1));
       im.setMatrixAt(i, m4);
       im.setColorAt(i, col.set(b.color ?? TOY.blue));
+      where[b.src] = {im, i, m: m4.clone(), rails: []};
     });
     im.instanceMatrix.needsUpdate = true;
     if (im.instanceColor) im.instanceColor.needsUpdate = true;
@@ -155,13 +158,25 @@ export function buildContainerField(list) {
       for (const y of [0.12, BOX.H - 0.12]) for (const s of [-1, 1]) {
         off.set(0, 0, s * (BOX.W / 2 - 0.06)).applyQuaternion(q);
         m4.compose(V3(b.x + off.x, (b.y ?? 0) + y, b.z + off.z), q, V3(1, 1, 1));
-        rail.setMatrixAt(i * 4 + k++, m4);
+        rail.setMatrixAt(i * 4 + k, m4);
+        where[b.src].rails.push({im: rail, i: i * 4 + k, m: m4.clone()});
+        k++;
       }
     });
     rail.instanceMatrix.needsUpdate = true;
     group.add(rail);
   }
-  return {group, count: list.length};
+  // hide a box of the list (index into list) while a mover carries it, show it again when it is back
+  const zero = new THREE.Matrix4().makeScale(0, 0, 0);
+  const setVisible = (i, on) => {
+    const w = where[i];
+    if (!w) return;
+    for (const p of [w, ...w.rails]) {
+      p.im.setMatrixAt(p.i, on ? p.m : zero);
+      p.im.instanceMatrix.needsUpdate = true;
+    }
+  };
+  return {group, count: list.length, setVisible};
 }
 export const lineOf = (key) => LINES[key] ?? '';
 
@@ -556,13 +571,14 @@ export function buildToyEmptyHandler({number = '02'} = {}) {
 // ================================================================ rubber-tyred gantry crane (RTG)
 /** the RTG: two portal frames on 4 bogies of 2 tyres, spanning 6 rows and a truck lane along local z (+-11), a top
  *  girder each side, a trolley with the cab and hoist, a spreader hanging on 4 ropes. Travels along local x. */
-export function buildToyRTG({number = '05'} = {}) {
+export function buildToyRTG({number = '05', span: spanIn = 11} = {}) {
   const M = mats();
   const group = new THREE.Group();
-  const span = 11;
+  // span: half the distance between the leg lines (11 = the film's RTG; wider leaves a roomier truck lane)
+  const span = spanIn;
   const top = 17.5;
   const hx = 7.0;
-  tpl(`rtg|${number}`, (P) => {
+  tpl(`rtg|${number}${span !== 11 ? '|' + span : ''}`, (P) => {
     for (const s of [-1, 1]) {
       // the sill beam along x with the two bogies and the diesel house on one side
       P.ext(M.yellow, -hx - 1.2, hx + 1.2, 1.1, 2.1, s * span - 0.6, s * span + 0.6, 0.25);

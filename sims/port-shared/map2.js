@@ -10,9 +10,9 @@
 import * as THREE from 'three';
 import {TOY, toyMat} from '../airport-shared/style.js';
 import {tpl, rb, canvasTex, buildToyForklift} from '../airport-shared/gse.js';
-import {buildToyCityBlock, buildToyCargoTerminal} from '../airport-shared/airside.js';
+import {buildToyCityBlock, buildToyCargoTerminal, buildToyFence, buildToyTrees} from '../airport-shared/airside.js';
 import {WATER, PORT_COLORS, buildToyWater, buildToyQuayCrane, buildToyGate, buildToyOffice, buildToyLightMast, buildToyReeferRack, buildToyMooringLine} from './infra.js';
-import {BOX, CONTAINER_COLORS as CC, buildContainerField, buildToyRTG, buildToyTerminalTractor, buildToyTerminalChassis, buildToyEmptyHandler, buildToyReachStacker, buildToyPrimeMover, buildToyRedCabTractor, buildToySkeletalTrailer} from './vehicles.js';
+import {BOX, CONTAINER_COLORS as CC, buildContainerField, buildToyStraddleCarrier, buildToyRTG, buildToyTerminalTractor, buildToyTerminalChassis, buildToyEmptyHandler, buildToyReachStacker, buildToyPrimeMover, buildToyRedCabTractor, buildToySkeletalTrailer} from './vehicles.js';
 import {LOGOS} from './logos.js';
 import * as S from './ships.js';
 
@@ -46,6 +46,31 @@ export const PB = {
   empty: (bi, si) => si === 0 && bi === 5,
   root: -45,
   aisles: [-197, -382],
+  // the empty depot (block 5's place in section 0): two pairs of rows of 20 ft empties either side of a 21.6 m working
+  // aisle centred on x 84, the outside trucks' lane down its middle
+  emptyX: 84,
+  emptyRows: [-15.9, -12.5, 12.5, 15.9],
+  // the straddle carriers' three blocks: section 2 of blocks 0-2 (the west half by the berth; blocks 3-5 there stay RTG
+  // blocks for the tractors). Each: 4 single rows of 40 ft boxes every 6.5 m about the block's centre (the carrier's
+  // legs run in the gaps), 2 high (a carrier lifts 1 over 2), worked from both ends: the aisle at z -382 and the apron
+  // loop's head lane; 8 m between the blocks. The carriers shuttle between them and the cranes of the north berth
+  // (z -414); the south berth keeps the tractors.
+  sc: {section: 2, blocks: [0, 1, 2], offsets: [-9.75, -3.25, 3.25, 9.75], berth: -414},
+  // gate B's forecourt, between the ring's north side and the pier, all inside the fence. Gate B is two gates facing
+  // east on a lane at z 132 alongside the ring: in at x -100 (2 lanes, the queue ±180 m back to where it leaves the ring
+  // at x -330, room for ±14 trucks), out at x 110 (±3 trucks of queue before it, then onto the ring at x 210). Behind the
+  // in gate the in road turns north at x -30 and runs straight to pier B's root aisle; the out road comes back south at
+  // x 30 and turns east to the out gate. A one-way turn-back at z 10 links them just short of the pier. The truck buffer
+  // lot is paved against the in road's west side (in at z 102, out at z 34), the CFS yard against the out road's east
+  // side (in at z 42, out at z 72), so a truck turning in or out has the whole width to swing through.
+  laneZ: 136, // (the gate lanes run flush against the ring's north side: 129..143)
+  gateIn: -100,
+  gateOut: 110,
+  inX: -30,
+  outX: 30,
+  backZ: 10,
+  lot: {x0: -165, x1: -37, z0: 25, z1: 110},
+  cfsYard: {x0: 37, x1: 258, z0: 30, z1: 120},
   head: -540,
   apronX: 112,
   qcX: 136,
@@ -54,6 +79,8 @@ export const PB = {
   berths: [-414, -150],
   craneBays: [68.5, 32.5, -3.5],
 };
+PB.isSC = (bi, si) => si === PB.sc.section && PB.sc.blocks.includes(bi);
+PB.sc.rows = PB.sc.blocks.flatMap((bi) => PB.sc.offsets.map((u) => PB.blocks[bi] + u));
 /** the bay centres (z) of a yard section */
 export const pbBays = ([z0, z1]) => {
   const out = [];
@@ -398,7 +425,22 @@ export function buildPortMap() {
       const tz = a.tz + (b.tz - a.tz) * k;
       return {x: a.x + (b.x - a.x) * k, z: a.z + (b.z - a.z) * k, yaw: Math.atan2(-tz, tx)};
     };
-    return {L, at, points: S.map((p) => [p.x, p.z])};
+    /** the point of the route nearest (x, z): its distance along the route and how far off it is */
+    const nearest = (x, z) => {
+      let best = {s: 0, d: Infinity};
+      for (let i = 0; i < S.length - 1; i++) {
+        const a = S[i];
+        const b = S[i + 1];
+        const vx = b.x - a.x;
+        const vz = b.z - a.z;
+        const l2 = vx * vx + vz * vz || 1;
+        const k = Math.min(1, Math.max(0, ((x - a.x) * vx + (z - a.z) * vz) / l2));
+        const d = Math.hypot(a.x + vx * k - x, a.z + vz * k - z);
+        if (d < best.d) best = {s: a.s + (b.s - a.s) * k, d};
+      }
+      return best;
+    };
+    return {L, at, nearest, points: S.map((p) => [p.x, p.z])};
   };
   /** a strip along the samples between lateral offsets o0..o1 (+ to the left of travel), skipping where skip(p) */
   const ribbon = (arr, S, o0, o1, skip = () => false) => {
@@ -414,7 +456,7 @@ export function buildPortMap() {
    *  12 m or wider); 'two': two-way (a solid centre line). r: the corner radius */
   const road = (pts, w, kind = 'one', {r = 30, closed = false, name = null, yellow = false, paved = true, users = 'all'} = {}) => {
     const S = smooth(pts, r, closed);
-    if (name) routes[name] = {...route(S), users};
+    if (name) routes[name] = {...route(S), users, w, closed, twoWay: kind === 'two'};
     const pnt = yellow ? pntY : pntW;
     const arrows = yellow ? arrowsY : arrowsW;
     if (paved) ribbon(asp, S, -w / 2, w / 2);
@@ -461,13 +503,14 @@ export function buildPortMap() {
   };
   /** a road along z (centre xs, ws wide) meeting the edge of a road along x at zEdge, running off to the side sgn;
    *  give: paint a give-way line across it (traffic merging onto the main road) */
-  const teeZ = (xs, zEdge, ws, sgn, give = false, r = 9) => {
-    fillet(xs - ws / 2, zEdge, r, -1, sgn);
-    fillet(xs + ws / 2, zEdge, r, 1, sgn);
+  // (sides: which corners get a fillet; an L-shaped corner wants only its inner one)
+  const teeZ = (xs, zEdge, ws, sgn, give = false, r = 12, sides = [-1, 1]) => {
+    if (sides.includes(-1)) fillet(xs - ws / 2, zEdge, r, -1, sgn);
+    if (sides.includes(1)) fillet(xs + ws / 2, zEdge, r, 1, sgn);
     noEdge.push([xs - ws / 2 - r - 0.5, zEdge - 1.8, xs + ws / 2 + r + 0.5, zEdge + 1.8]);
     if (give) for (let x = xs - ws / 2 + 1.5; x < xs + ws / 2 - 1; x += 2) marks.push({x, z: zEdge + sgn * 2.5, l: 1.1, w: 0.5, ry: 0});
   };
-  const teeX = (zs, xEdge, ws, sgn, give = false, r = 9) => {
+  const teeX = (zs, xEdge, ws, sgn, give = false, r = 12) => {
     fillet(xEdge, zs - ws / 2, r, sgn, -1);
     fillet(xEdge, zs + ws / 2, r, sgn, 1);
     noEdge.push([xEdge - 1.8, zs - ws / 2 - r - 0.5, xEdge + 1.8, zs + ws / 2 + r + 0.5]);
@@ -500,23 +543,42 @@ export function buildPortMap() {
   gate(OUT2, 'GERBANG KELUAR', 300, 600, PI / 2, 26, 9);
   quiet.push([288, 474, 312, 506]); // under the X-ray portal
   gate([{z: -12, dir: 1}, {z: -6, dir: 1}, {z: 6, dir: -1}, {z: 12, dir: -1}], 'GATE A', -460, 90, PI / 2);
-  gate([{z: -15, dir: 1}, {z: -9, dir: 1}, {z: -3, dir: 1}, {z: 3, dir: -1}, {z: 9, dir: -1}, {z: 15, dir: -1}], 'GATE B', 0, 90, PI / 2);
+  gate(IN2, 'GATE B MASUK', PB.gateIn, PB.laneZ, 0, 22, 7);
+  gate(IN2, 'GATE B KELUAR', PB.gateOut, PB.laneZ, 0, 22, 7);
   gate([{z: -12, dir: 1}, {z: -6, dir: 1}, {z: 6, dir: -1}, {z: 12, dir: -1}], 'GATE C', 456, 90, PI / 2);
   gate(IN2, 'GATE RO-RO', 640, 215, 0, 26, 9);
   gate([{z: -3, dir: 1}, {z: 3, dir: -1}], 'GERBANG ENERGI', -880, 250, PI / 2, 26, 9);
   // the junctions: rounded mouths, the main road's edge line broken, give-way lines where traffic merges
-  teeZ(-9, PB.root + 7, 18, 1, true);
-  teeZ(9, PB.root + 7, 18, 1);
-  teeZ(-PB.apronX, PB.root - 7, 14, -1);
-  teeZ(PB.apronX, PB.root - 7, 14, -1, true);
-  for (const [xi, xo] of [[-469, -451], [-9, 9], [447, 465]]) {
+  teeZ(PB.inX, PB.root + 7, 14, 1, true);
+  teeZ(PB.outX, PB.root + 7, 14, 1);
+  // the apron loop leaves and rejoins the root aisle at its ends: inner corners rounded only (no asphalt spurs out
+  // over the crane lanes)
+  teeZ(-PB.apronX, PB.root - 7, 14, -1, false, 12, [1]);
+  teeZ(PB.apronX, PB.root - 7, 14, -1, true, 12, [-1]);
+  for (const [xi, xo] of [[-469, -451], [447, 465]]) {
     teeZ(xi, RN - 7, 18, -1);
     teeZ(xo, RN - 7, 18, -1, true);
   }
-  teeZ(-200, RN + 7, 14, 1, true); // the north link onto the north side
-  teeZ(-145, RN + 7, 10, 1, true); // out of the pre-gate lot
-  noEdge.push([-195, 292, -191, 326]); // into the pre-gate lot, off the north link
-  teeZ(-200, RS - 7, 14, -1); // ... off the south side
+  teeZ(-360, RN + 7, 14, 1, true); // the north link onto the north side
+  {
+    // gate B's forecourt: where the in lane leaves the ring and the out lane joins it (tapers: the ring's edge line
+    // open), the turn-back between the in and out roads, the mouths of the truck buffer lot and the CFS yard
+    // the in lane peels off the ring (a taper x -380..-330, then a dashed line to x -260) and runs flush along it to
+    // the in gate; the out lane runs flush along it from the out gate and merges back (dashed x 160..240, taper to 290)
+    noEdge.push([-382, RN - 8.5, -258, RN - 5.5], [158, RN - 8.5, 292, RN - 5.5]);
+    for (let x = -378; x < -260; x += 8) marks.push({x, z: RN - 7, l: 4, w: 0.45, ry: 0});
+    for (let x = 162; x < 290; x += 8) marks.push({x, z: RN - 7, l: 4, w: 0.45, ry: 0});
+    tri(asp, -380, RN - 7, -330, RN - 21, -330, RN - 7);
+    tri(asp, 240, RN - 21, 290, RN - 7, 240, RN - 7);
+    teeX(PB.backZ, PB.inX + 7, 10, 1);
+    teeX(PB.backZ, PB.outX - 7, 10, -1, true);
+    const wi = PB.inX - 7;
+    const eo = PB.outX + 7;
+    noEdge.push([wi - 2.5, 94, wi + 2, 110], [wi - 2.5, 26, wi + 2, 42], [eo - 2, 34, eo + 2.5, 50], [eo - 2, 64, eo + 2.5, 80]);
+    for (let z = 29.5; z <= 39; z += 2) marks.push({x: wi - 2.5, z, l: 1.1, w: 0.5, ry: PI / 2});
+    for (let z = 67.5; z <= 77; z += 2) marks.push({x: eo + 2.5, z, l: 1.1, w: 0.5, ry: PI / 2});
+  }
+  teeZ(-360, RS - 7, 14, -1); // ... off the south side
   teeZ(-100, RS + 7, 12, 1, true); // the in ramp onto the ring
   teeZ(300, RS + 7, 12, 1); // the out ramp off it
   teeZ(-380, RS + 7, 10, 1);
@@ -539,7 +601,7 @@ export function buildPortMap() {
   // out: off the ring, the X-ray portal, the gate, round onto the slip lane east
   road([[300, RS + 7], [300, TOLL_N - 6], [460, TOLL_N - 6]], 12, 'one', {r: 40, name: 'out'});
   // the north link
-  road([[-200, RS - 7], [-200, RN + 7]], 14, 'one', {name: 'northLink'});
+  road([[-360, RS - 7], [-360, RN + 7]], 14, 'one', {name: 'northLink'});
   // the piers: in through the gate's west half, round the pier clockwise, out through the east half
   const pier = (xi, xo, xw, xe, zh, name) => road([[xi, RN - 7], [xi, 10], [xw, 10], [xw, zh], [xe, zh], [xe, 10], [xo, 10], [xo, RN - 7]], 18, 'one', {r: 16, name});
   pier(-469, -451, -509, -405, -511, 'pierA');
@@ -552,9 +614,26 @@ export function buildPortMap() {
   {
     const R = PB.root;
     const A = PB.apronX;
-    road([[-9, RN - 7], [-9, R + 7]], 18, 'one', {name: 'pierB.in'});
-    road([[9, R + 7], [9, RN - 7]], 18, 'one', {name: 'pierB.out'});
+    // no paint over the crane rails (landside x -+126, waterside x -+146): the connectors cross the landside one
+    for (const s of [-1, 1]) for (const x of [126, 146]) quiet.push([s * x - 1.2, -600, s * x + 1.2, 0]);
+    // in: off the ring's north side on a long taper, the queue (2 lanes) to the in gate, east, a wide left turn (r 24)
+    // north and straight up to the root aisle. Out: from the root aisle straight south, a wide left turn east, the out
+    // gate, a taper onto the ring. The turn-back east at z 10
+    const LZ = PB.laneZ;
+    road([[-330, LZ], [PB.inX, LZ], [PB.inX, R + 7]], 14, 'one', {r: 24, name: 'pierB.in'});
+    road([[PB.outX, R + 7], [PB.outX, LZ], [240, LZ]], 14, 'one', {r: 24, name: 'pierB.out'});
+    // the tapers as routes, so the movers' graph links the ring to the lanes
+    routes['pierB.inTaper'] = {...route(smooth([[-385, RN], [-330, LZ]], 0, false)), users: 'all', w: 14};
+    routes['pierB.outTaper'] = {...route(smooth([[240, LZ], [295, RN]], 0, false)), users: 'all', w: 14};
+    road([[PB.inX + 7, PB.backZ], [PB.outX - 7, PB.backZ]], 10, 'one', {name: 'pierB.turnBack'});
     road([[-A - 7, R], [A + 7, R]], 14, 'two', {name: 'pierB.root'});
+    // the two-way roads' lanes, for the movers (left-hand traffic: eastbound keeps to the north side, z - 3.5)
+    const lanes2 = (name, z, x0, x1) => {
+      routes[`${name}.E`] = {...route(smooth([[x0, z - 3.5], [x1, z - 3.5]], 0, false)), users: 'all', w: 7, laneOf: name};
+      routes[`${name}.W`] = {...route(smooth([[x1, z + 3.5], [x0, z + 3.5]], 0, false)), users: 'all', w: 7, laneOf: name};
+    };
+    lanes2('pierB.root', R, -A - 7, A + 7);
+    for (const z of PB.aisles) lanes2(`pierB.aisle${z}`, z, -A + 7, A - 7);
     road([[-A, R - 7], [-A, PB.head], [A, PB.head], [A, R - 7]], 14, 'one', {r: 16, name: 'pierB.apron', yellow: true, users: 'tractor'});
     for (const z of PB.aisles) {
       road([[-A + 7, z], [A - 7, z]], 14, 'two', {name: `pierB.aisle${z}`});
@@ -562,7 +641,7 @@ export function buildPortMap() {
       teeX(z, A - 7, 14, -1);
     }
     PB.blocks.forEach((bx, bi) => PB.sections.forEach((sec, si) => {
-      if (PB.empty(bi, si)) return;
+      if (PB.empty(bi, si) || PB.isSC(bi, si)) return;
       const lx = bx + PB.lane;
       const zs = si === 0 ? R - 7 : PB.aisles[si - 1] - 7;
       const zn = si === 2 ? PB.head + 7 : PB.aisles[si] + 7;
@@ -571,21 +650,22 @@ export function buildPortMap() {
     }));
     // the empty depot's middle aisle, one way north from the root aisle to the first cross aisle
     {
-      const ex = PB.blocks[5];
+      const ex = PB.emptyX;
       road([[ex, R - 7], [ex, PB.aisles[0] + 7]], PB.laneW, 'one', {name: 'pierB.emptyAisle'});
     }
     // the crane connectors: west side northbound, east side southbound with the apron loop. Each: off the loop, along
     // the working lane past the berth's three cranes, back onto the loop
     for (const zc of PB.berths) {
+      // (the 20 m shift over 30 m, curves r 16: a tractor and chassis, ±20 m, takes it without cutting the corner)
       const z0 = zc + PB.craneBays[2] + 62; // south of the cranes
-      const z1 = zc - PB.craneBays[0] - 22; // north of them
-      road([[-A, z0 + 20], [-PB.qcLane, z0], [-PB.qcLane, z1], [-A, z1 - 20]], 5, 'one', {r: 10, paved: false, yellow: true, name: `pierB.qcW${zc}`, users: 'tractor'});
-      road([[A, z1 - 20], [PB.qcLane, z1], [PB.qcLane, z0], [A, z0 + 20]], 5, 'one', {r: 10, paved: false, yellow: true, name: `pierB.qcE${zc}`, users: 'tractor'});
+      const z1 = zc - PB.craneBays[0] - 14; // north of them
+      road([[-A, z0 + 30], [-PB.qcLane, z0], [-PB.qcLane, z1], [-A, z1 - 30]], 5, 'one', {r: 16, paved: false, yellow: true, name: `pierB.qcW${zc}`, users: 'tractor'});
+      road([[A, z1 - 30], [PB.qcLane, z1], [PB.qcLane, z0], [A, z0 + 30]], 5, 'one', {r: 16, paved: false, yellow: true, name: `pierB.qcE${zc}`, users: 'tractor'});
     }
     for (const s of [-1, 1]) {
       const x = s * (PB.qcLane + 5);
       const pts = s < 0 ? [[x, R - 7], [x, PB.head]] : [[x, PB.head], [x, R - 7]];
-      routes[`pierB.qcPass${s < 0 ? 'W' : 'E'}`] = {...route(smooth(pts, 0, false)), users: 'tractor'};
+      routes[`pierB.qcPass${s < 0 ? 'W' : 'E'}`] = {...route(smooth(pts, 0, false)), users: 'tractor', w: 5};
     }
   }
   // the Ro-Ro yard: in through its gate, up to the quay apron (the ramp), round the yard, back onto the ring
@@ -624,34 +704,63 @@ export function buildPortMap() {
         if (fromNorth) give(lx, az - 7 - 2.5);
       });
     });
-    box(PB.blocks[5], PB.root, 6, 13);
-    give(PB.blocks[5], PB.aisles[0] + 7 + 2.5);
+    box(PB.emptyX, PB.root, 6, 13);
+    box(PB.emptyX, PB.aisles[0], 6, 13);
+    give(PB.emptyX, PB.aisles[0] + 7 + 2.5);
+  }
+  // the CFS road, and the outline of the straddle carriers' block with a carrier lane mark at each row end
+  // the CFS yard (paved): one-way lanes painted on it. In off the forecourt loop at z 42, east along the north lane, down
+  // the east lane (the first reach stacker's trucks), west along the south lane, up the west lane past the docks and
+  // back onto the loop at z 68. The middle lane (x 178, north) short-cuts from the south lane back to the north one,
+  // past the second and third reach stackers
+  {
+    const Y = PB.cfsYard;
+    quad(asp, [Y.x0, Y.z0], [Y.x1, Y.z0], [Y.x1, Y.z1], [Y.x0, Y.z1]);
+    roadRects.push([Y.x0, Y.z0, Y.x1, Y.z1]);
+    road([[PB.outX + 7, 42], [250, 42], [250, 110], [95, 110], [95, 72], [PB.outX + 7, 72]], 10, 'one', {r: 16, paved: false, name: 'cfs'});
+    road([[178, 105], [178, 47]], 8, 'one', {paved: false, name: 'cfs.middle'});
+  }
+  {
+    const [z0, z1] = PB.sections[PB.sc.section];
+    for (const bi of PB.sc.blocks) {
+      const x0 = PB.blocks[bi] + PB.sc.offsets[0] - 3.25;
+      const x1 = PB.blocks[bi] + PB.sc.offsets[PB.sc.offsets.length - 1] + 3.25;
+      for (const z of [z0 + 4, z1 - 4]) marksY.push({x: (x0 + x1) / 2, z, l: x1 - x0, w: 0.4, ry: 0});
+      for (const x of [x0, x1]) marksY.push({x, z: (z0 + z1) / 2, l: z0 - z1 + 8, w: 0.4, ry: PI / 2});
+    }
+    // the leg tracks: a short yellow line each side of every row at both ends
+    for (const x of PB.sc.rows) for (const sx of [-2.7, 2.7]) for (const z of [z0 + 1, z1 - 1]) marksY.push({x: x + sx, z, l: 6, w: 0.3, ry: PI / 2});
+    // each row both ways, from the aisle's centre to the head lane's: a carrier from a west crane comes off the head lane
+    // south down a row and leaves west along the aisle; one from an east crane comes in off the aisle north up a row and
+    // leaves east along the head lane (the head lane, the aisle and the apron loop link them to the crane lanes)
+    // a straddle carrier back from the blocks to the west cranes: off the aisle's west end straight into the crane lane
+    // (a carrier turns far tighter than a truck), up past the cranes and onto the apron loop by the head
+    routes['pierB.sc.toQcW'] = {...route(smooth([[-PB.apronX + 7, PB.aisles[1] + 3.5], [-PB.qcLane, PB.aisles[1] - 12], [-PB.qcLane, -505], [-PB.apronX, -525]], 8, false)), users: 'sc', w: 6};
+    PB.sc.rows.forEach((x, r) => {
+      routes[`pierB.scRow${r}`] = {...route(smooth([[x, PB.aisles[1]], [x, PB.head]], 0, false)), users: 'sc', w: 6};
+      routes[`pierB.scRow${r}.S`] = {...route(smooth([[x, PB.head], [x, PB.aisles[1]]], 0, false)), users: 'sc', w: 6};
+    });
   }
   // parking. Pier B's root, either side of the gate stubs, south of the root aisle: the yard tractors' pocket (west,
-  // yellow stalls, 5 m wide, 24 m deep: a tractor and its chassis backed in) and the equipment park (east: the reach
-  // stacker and spares). Inside the ring by the north link: the outside trucks' pre-gate lot (white stalls in two rows,
-  // in off the north link, out onto the ring's north side to gate B)
-  const LOT = {x0: -193, x1: -100, z0: 170, z1: 330};
+  // yellow stalls, 5 m wide, 24 m deep: a tractor and its chassis backed in) and the equipment park (east).
   {
-    for (let x = -100; x <= -30; x += 5) marksY.push({x, z: -20, l: 26, w: 0.3, ry: PI / 2});
-    marksY.push({x: -65, z: -33, l: 70, w: 0.4, ry: 0});
-    for (const x of [30, 46, 62, 78, 94]) marksY.push({x, z: -20, l: 26, w: 0.3, ry: PI / 2});
-    marksY.push({x: 62, z: -33, l: 64, w: 0.4, ry: 0});
-    // the pre-gate lot: asphalt, stalls along its west and east sides, the drive aisle between
-    quad(asp, [LOT.x0, LOT.z0], [LOT.x1, LOT.z0], [LOT.x1, LOT.z1], [LOT.x0, LOT.z1]);
-    roadRects.push([LOT.x0, LOT.z0, LOT.x1, LOT.z1]);
-    for (let z = 180; z <= 290; z += 5) marks.push({x: -178, z, l: 24, w: 0.3, ry: 0});
-    for (let z = 180; z <= 320; z += 5) marks.push({x: -112, z, l: 24, w: 0.3, ry: 0});
-    marks.push({x: -166, z: 235, l: 110, w: 0.4, ry: PI / 2}, {x: -124, z: 250, l: 140, w: 0.4, ry: PI / 2});
-    road([[-145, LOT.z0 + 6], [-145, RN + 7]], 10, 'one', {name: 'pregate.out'});
-    for (const z of [300, 240]) arrowsW.push({x: -145, z, ry: PI / 2});
-    arrowsW.push({x: -182, z: 308, ry: 0});
-    routes['pregate.in'] = {...route(smooth([[-200, 330], [-200, 310], [-150, 300], [-145, 180]], 14, false)), users: 'all'};
+    // (the pockets keep clear of the in and out roads at x -+30)
+    for (let x = -100; x <= -45; x += 5) marksY.push({x, z: -20, l: 26, w: 0.3, ry: PI / 2});
+    marksY.push({x: -72.5, z: -33, l: 55, w: 0.4, ry: 0});
+    for (const x of [46, 62, 78, 94]) marksY.push({x, z: -20, l: 26, w: 0.3, ry: PI / 2});
+    marksY.push({x: 70, z: -33, l: 48, w: 0.4, ry: 0});
+    // the truck buffer lot (inside the fence): in off the forecourt loop's west side at z 72, down the east aisle,
+    // across the south, up the west aisle, across the north and out at z 38. Stalls 24 m deep, noses to the west aisle
+    const L = PB.lot;
+    quad(asp, [L.x0, L.z0], [L.x1, L.z0], [L.x1, L.z1], [L.x0, L.z1]);
+    for (let z = 40; z <= 95; z += 5) marks.push({x: -153, z, l: 24, w: 0.3, ry: 0}, {x: -109, z, l: 24, w: 0.3, ry: 0});
+    // in off the in road at z 102, west along the south, up the west aisle, east along the north, out at z 34
+    arrowsW.push({x: -60, z: 102, ry: PI}, {x: -131, z: 70, ry: PI / 2}, {x: -90, z: 32, ry: 0}, {x: -50, z: 32, ry: 0});
+    routes['pierB.buffer'] = {...route(smooth([[PB.inX, 102], [-131, 102], [-131, 32], [PB.inX, 32]], 16, false)), users: 'all', w: 10};
   }
   // zebra crossings: staff from the office over the ring to gate B, drivers over the pier stubs to the gate kiosks,
   // the ramps by the gates and the X-ray cabin, the Ro-Ro yard, the ferry and cruise terminals
-  zebraX(-40, RN, 14);
-  for (const xc of [-460, 0, 456]) zebraZ(xc, 128, 36);
+  for (const xc of [-460, 456]) zebraZ(xc, 128, 36);
   zebraZ(-100, 645, 12);
   zebraZ(300, 530, 12);
   zebraZ(700, 120, 12);
@@ -675,8 +784,10 @@ export function buildPortMap() {
       m.receiveShadow = true;
       return m;
     };
-    const paintMat = toyMat(TOY.lane, {rough: 0.9});
-    const yellowMat = toyMat('#f2c230', {rough: 0.85});
+    // the paint is worn: half see-through, so the asphalt shows through and the lines guide without shouting
+    const worn = (color, opacity) => new THREE.MeshStandardMaterial({color, roughness: 0.95, transparent: true, opacity, depthWrite: false});
+    const paintMat = worn('#f4f6fc', 0.5);
+    const yellowMat = worn('#e9c55a', 0.55);
     roads.add(flat(asp, 0.55, toyMat(ROAD, {rough: 0.95})), flat(pntW, 0.6, paintMat), flat(pntY, 0.6, yellowMat));
     const m4 = new THREE.Matrix4();
     const q = new THREE.Quaternion();
@@ -791,7 +902,7 @@ export function buildPortMap() {
   // reefer section (racks between the rows, white boxes) in blocks 2 and 3, the empty depot (20 ft empties 4-5 high,
   // worked by empty handlers) in block 5. Every box sits in a slot of pierB.yard.slots ({id, kind, x, z, ry, len, tiers:
   // [index into the field]}), so a mover can hide the box it lifts (field.setVisible) and find where to put one.
-  const pierB = {cranes: [], rtgs: [], ships: [], trucks: [], yard: null, gate: gates['GATE B']};
+  const pierB = {cranes: [], rtgs: [], ships: [], trucks: [], yard: null, gate: {in: gates['GATE B MASUK'], out: gates['GATE B KELUAR']}};
   {
     const list = [];
     const slots = [];
@@ -840,8 +951,9 @@ export function buildPortMap() {
       const empty = PB.empty(bi, si);
       const zs = pbBays(sec);
       if (empty) {
-        // two pairs of rows of 20 ft empties, the handlers' aisle (17.6 m: room for a handler to face a row) between
-        [-13.9, -10.5, 10.5, 13.9].forEach((u, r) => {
+        // two pairs of rows of 20 ft empties, the working aisle between (see PB.emptyRows)
+        PB.emptyRows.forEach((u0, r) => {
+          const u = PB.emptyX - bx + u0;
           let b = 0;
           for (let z = sec[0] - 5; z - 4 >= sec[1]; z -= 8.6, b++) {
             const t = rnd() < 0.08 ? 0 : 4 + (rnd() < 0.5 ? 1 : 0);
@@ -868,6 +980,13 @@ export function buildPortMap() {
         pierB.rtgs.push({rtg, block: bi, section: si, x: bx, z});
         return;
       }
+      if (PB.isSC(bi, si)) {
+        PB.sc.offsets.forEach((u, r) => zs.forEach((z, b) => {
+          const t = rnd() < 0.15 ? 0 : rnd() < 0.55 ? 2 : 1;
+          slot(`S${bi}.${b}.${r}`, 'sc', bx + u, z, BOX.L40, t, pick);
+        }));
+        return;
+      }
       zs.forEach((z, b) => {
         const lvl = rnd() < 0.08 ? 0 : rnd() < 0.7 ? 3 : 2; // 0: an empty bay
         PB.rows.forEach((u, r) => {
@@ -892,19 +1011,27 @@ export function buildPortMap() {
     }));
     // trucks travelling the RTG lanes (with the lane) and the two-way cross aisles (keeping left)
     truck(PB.blocks[1] + LANE, -300, -PI / 2, pick(), 'road');
-    truck(PB.blocks[3] + LANE, -470, -PI / 2);
     truck(-30, PB.aisles[0] - 3.5, 0, pick(), 'road');
     truck(40, PB.aisles[1] + 3.5, PI, pick(), 'road');
-    // the empty depot's handlers in their aisle, the reach stacker at its end
-    // (the handler's frame reaches 6.6 m ahead of its centre: it stands so the frame meets the row's face)
-    const ex = PB.blocks[5];
-    for (const [x, z, ry] of [[ex + 10.5 - 1.7 - 6.6, -100, 0], [ex - 10.5 + 1.7 + 6.6, -150, PI]]) {
-      const eh = buildToyEmptyHandler({number: z < -120 ? '03' : '02'});
-      eh.setLift(z < -120 ? 10 : 3);
-      add(eh.group, x, z, ry);
+    // the empty depot at work. The handler carries a 20 ft box 5.1 m ahead of its centre, the box lengthwise across the
+    // machine (along z here, like the rows and a truck in the lane). EH-02 stands west of the lane facing it, its frame
+    // down on the box of an outside truck that has stopped beside it (the box's top at 5.3); behind it 1.3 m to the
+    // west rows. EH-03 faces the east rows, its frame up at the fourth tier.
+    const ex = PB.emptyX;
+    const ehs = [];
+    {
+      const eh = buildToyEmptyHandler({number: '02'});
+      eh.setLift(5.3);
+      add(eh.group, ex - 5.1, -110, 0);
+      ehs.push({eh, x: ex - 5.1, z: -110, ry: 0});
+      truck(ex, -110 - 9.9, PI / 2, CC.sky, 'road');
+      const eh3 = buildToyEmptyHandler({number: '03'});
+      eh3.setLift(12);
+      add(eh3.group, ex + PB.emptyRows[2] - 5.1, -150, 0);
+      ehs.push({eh: eh3, x: ex + PB.emptyRows[2] - 5.1, z: -150, ry: 0});
     }
-    // the equipment park: the reach stacker (spare for the empty depot and out-of-gauge boxes), a spare empty handler
-    add(buildToyReachStacker({number: '04'}).group, 38, -18, PI / 2);
+    pierB.emptyHandlers = ehs;
+    // the equipment park: a spare empty handler (the reach stacker works at the CFS)
     {
       const eh = buildToyEmptyHandler({number: '05'});
       eh.setLift(1);
@@ -912,11 +1039,26 @@ export function buildPortMap() {
     }
     // the tractor pocket: tractors and chassis backed in, noses to the root aisle
     for (const x of [-97.5, -92.5, -82.5, -72.5, -67.5, -52.5]) truck(x, -27, PI / 2);
-    // the pre-gate lot: outside trucks waiting their slot, facing the drive aisle
-    [[-169, 190], [-169, 205], [-169, 230], [-169, 265], [-121, 200], [-121, 285]].forEach(([x, z], i) => truck(x, z, x < -150 ? 0 : PI, i % 2 ? pick() : null, 'road'));
+    // the pre-gate lot: outside trucks waiting their slot, noses to the drive aisles
+    [[-145, 47.5, 0], [-145, 62.5, 0], [-145, 82.5, 0], [-117, 52.5, PI], [-117, 72.5, PI], [-117, 92.5, PI]].forEach(([x, z, ry], i) => truck(x, z, ry, i % 2 ? pick() : null, 'road'));
     // three cranes per ship, each over a hatch (PB.craneBays, ship-local), lifted 12 m so the spreaders clear the
     // six-high deck stacks. Trolleys and spreaders at different points of a cycle; a yard tractor in the lane under each
     // crane, heading the apron loop's way (north on the west side), its box under the spreader on the cranes landing one
+    // a straddle carrier: heading ry, carrying a box when color is given (the box between its legs, its underside at
+    // lift - 3.6). It takes boxes off the ground (never from a crane's spreader: its own top frame is in the way)
+    pierB.straddles = [];
+    let scn = 11;
+    const straddle = (x, z, ry, lift, color = null) => {
+      const sc = buildToyStraddleCarrier({number: String(scn++)});
+      sc.setLift(lift);
+      add(sc.group, x, z, ry);
+      let box = null;
+      if (color) {
+        box = list.length;
+        list.push({x, y: lift - BOX.H, z, len: BOX.L40, ry, color});
+      }
+      pierB.straddles.push({sc, x, z, ry, lift, box});
+    };
     let n = 1;
     for (const side of [-1, 1]) for (const zc of PB.berths) for (const bay of PB.craneBays) {
       const qc = buildToyQuayCrane({number: String(n).padStart(2, '0'), lift: 12});
@@ -929,8 +1071,56 @@ export function buildPortMap() {
       add(qc.group, x, z, ry);
       pierB.cranes.push({qc, number: n, x, z, ry, side: side < 0 ? 'W' : 'E', berth: zc, bay});
       const hz = side < 0 ? -1 : 1;
-      truck(side * PB.qcLane, z + hz * (k === 3 ? 9.8 : 24), side < 0 ? PI / 2 : -PI / 2, k === 2 || k === 3 ? pick() : null);
+      // the landing spot: where this crane sets a box down and the next mover takes it (the working lane under the
+      // trolley, at the crane's centre). The north berth's cranes land on the ground for the straddle carriers (crane
+      // and carrier never wait for each other); the south berth's land on a tractor's chassis
+      const crane = pierB.cranes[pierB.cranes.length - 1];
+      const lx = side * PB.qcLane;
+      const dir = side < 0 ? PI / 2 : -PI / 2;
+      if (zc === PB.sc.berth) {
+        crane.landing = {x: lx, z, y: 0, ry: PI / 2, mode: 'ground', box: null};
+        crane.stop = {x: lx, z, ry: dir, who: 'sc'}; // a straddle carrier straddling the landing
+        if (k === 3) {
+          // the box just set down, the spreader still on it; a carrier coming up behind, spreader high, to straddle it
+          qc.setHoist(BOX.H);
+          crane.landing.box = list.length;
+          list.push({x: lx, y: 0, z, len: BOX.L40, ry: PI / 2, color: pick()});
+          straddle(lx, z - hz * 16, dir, 11.5);
+        } else if (k === 2) straddle(lx, z + hz * 18, dir, 5.6, pick()); // one driving off with the box it picked up
+        else straddle(lx, z - hz * 18, dir, 11.5); // one waiting its turn behind the crane
+      } else {
+        crane.landing = {x: lx, z, y: 1.5, ry: PI / 2, mode: 'chassis', box: null};
+        crane.stop = {x: lx, z: z + hz * 9.8, ry: dir, who: 'tractor'}; // a tractor whose chassis puts the box under it
+        truck(lx, z + hz * (k === 3 ? 9.8 : 24), dir, k === 2 || k === 3 ? pick() : null);
+      }
       n++;
+    }
+    // straddle carriers in their block: one in a row, lifting a box over the 2-high stacks; one on the head lane with a
+    // box, heading for the rows
+    straddle(PB.sc.rows[2], -460, PI / 2, 11.5, pick());
+    straddle(PB.sc.rows[9], -470, -PI / 2, 5.6);
+    straddle(-60, PB.head, 0, 11.5, pick());
+    // the CFS yard at work: a tractor and chassis backed to dock 3 (the docks face west at x 130 onto the west lane); two
+    // box pads back to back (A: x 222-226, B: x 202-206, 3 bays each, 1-3 high); three reach stackers. RS-04 by the
+    // east lane, lifting the box of an outside truck stopped there; RS-05 by the middle lane, lifting the box of a truck
+    // stopped there; RS-06 on the same side, stacking on pad B
+    {
+      truck(129.5 - 17.25, 80, PI, pick());
+      const rss = [];
+      const stacker = (number, x, z, ry, rx, ryh) => {
+        const rs = buildToyReachStacker({number});
+        add(rs.group, x, z, ry);
+        rs.reach(rx, ryh);
+        rss.push({rs, x, z, ry});
+      };
+      truck(250, 80 + 9.9, -PI / 2, pick(), 'road');
+      stacker('04', 237, 80, 0, 13, 5.1);
+      truck(178, 63 - 9.9, PI / 2, pick(), 'road');
+      stacker('05', 191, 63, PI, 13, 5.1);
+      stacker('06', 191, 95, 0, 11.3, 11);
+      pierB.reachStackers = rss;
+      pierB.reachStacker = rss[0];
+      for (const [pad, xs] of [['A', [222.3, 225.7]], ['B', [202.3, 205.7]]]) xs.forEach((x, r) => [55, 72, 89].forEach((z, b) => slot(`CFS.${pad}.${b}.${r}`, 'cfs', x, z, BOX.L40, 1 + Math.floor(rnd() * 3), pick)));
     }
     // the apron loop
     truck(-PB.apronX, -280, PI / 2, pick());
@@ -940,8 +1130,9 @@ export function buildPortMap() {
     const field = buildContainerField(list);
     root.add(field.group);
     // stacking limits (the animation's rules): RTG blocks 3 high (the RTG lifts 1 over 3: its hoist tops out at 14.5),
-    // reefers 2 (the rack's plug level), empties 5 (the empty handler's frame reaches 15)
-    const LIMIT = {std: 3, reefer: 2, empty: 5};
+    // reefers 2 (the rack's plug level), empties 5 (the empty handler's frame reaches 15), the straddle carriers' block 2
+    // (a carrier lifts 1 over 2), the CFS pad 3 (the reach stacker)
+    const LIMIT = {std: 3, reefer: 2, empty: 5, sc: 2, cfs: 3};
     const posOf = (sl, tier) => new THREE.Vector3(sl.x, tier * BOX.H, sl.z);
     pierB.yard = {
       slots,
@@ -955,33 +1146,90 @@ export function buildPortMap() {
       posOf,
     };
   }
-  // the CFS (stuffing and stripping) on the west side of the gate road, docks to the road, a forklift at the open door
+  // the CFS (stuffing and stripping) inside its loop, docks facing west onto the loop's west leg, a forklift at the open
+  // door. Turned a quarter the other way: local (x, z) -> world (-z, x), its dock face (local z 0) at x 100
   {
     const cfs = buildToyCargoTerminal({docks: 4, stock: true, name: 'CFS', sign: [LOGOS.blue, 'CFS  ·  Container Freight Station']});
-    // turned so its dock face (local +z) looks east onto the gate road
-    add(cfs.group, -40, 262, PI / 2);
-    for (let i = 0; i < 4; i++) cfs.setDoor(i, i === 1 ? 1 : 0);
-    // the forklift just out of the open door, facing it (local (x, z) -> world (z, -x) for the quarter turn)
+    add(cfs.group, 130, 75, -PI / 2);
+    for (let i = 0; i < 4; i++) cfs.setDoor(i, i === 1 || i === 2 ? 1 : 0);
     const d = cfs.docks[1];
-    add(buildToyForklift().group, -40 + d.z + 5, 262 - d.x, PI);
+    add(buildToyForklift().group, 130 - d.z - 5, 75 + d.x, 0);
+
   }
-  // the terminal office and the workshop inside the ring, behind gate B
-  add(buildToyOffice().group, -64, 190, PI / 2);
+  // pier B's ISPS fence: from the shore west of the pier along z 128 (between the ring and the forecourt) to gate B and
+  // on to the shore between piers B and C, so the whole forecourt (the truck buffer, the CFS, the workshop) is inside
+  // and gate B the only way in
+  {
+    const fence = (pts) => {
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [x0, z0] = pts[i];
+        const [x1, z1] = pts[i + 1];
+        const len = Math.hypot(x1 - x0, z1 - z0);
+        const n = Math.ceil(len / 30);
+        for (let k = 0; k < n; k++) {
+          const a = k / n;
+          const b = (k + 1) / n;
+          add(buildToyFence({length: len / n}), x0 + (x1 - x0) * (a + b) / 2, z0 + (z1 - z0) * (a + b) / 2, Math.atan2(-(z1 - z0), x1 - x0));
+        }
+      }
+    };
+    // (the gates' islands reach z -+6.2 about the lane: the fence meets them; between the gates it runs along the ring)
+    const LZ = PB.laneZ;
+    fence([[-175, 1], [-175, 120], [PB.gateIn, 120], [PB.gateIn, LZ - 6.2]]);
+    fence([[PB.gateIn, LZ + 6.2], [PB.gateIn, 142.6], [PB.gateOut, 142.6], [PB.gateOut, LZ + 6.2]]);
+    fence([[PB.gateOut, LZ - 6.2], [PB.gateOut, 120], [340, 120], [340, 1]]);
+  }
+  // trees: a row down the west side of the pre-gate lot, a grove in the CFS loop and east of the workshop, rows along
+  // the inside of the ring (clear of the north link and the office)
+  {
+    const trees = [];
+    let ts = 11;
+    const tr = () => ((ts = (ts * 16807) % 2147483647) / 2147483647);
+    const tree = (x, z) => trees.push({x: x + (tr() - 0.5) * 2, z: z + (tr() - 0.5) * 2, size: 0.9 + tr() * 0.5, rot: tr() * PI * 2});
+    for (let z = 26; z <= 118; z += 13) tree(-170, z);
+    for (const x of [-12, 12]) for (const z of [32, 44]) tree(x, z); // the strip between the in and out roads
+    for (const x of [314, 330]) for (let z = 22; z <= 130; z += 15) tree(x, z);
+    for (let x = -520; x <= 560; x += 20) {
+      if (Math.abs(x + 360) < 16) continue;
+      if (x > -84 && x < -40) continue;
+      tree(x, RN + 20);
+      tree(x, RS - 20);
+    }
+    root.add(buildToyTrees(trees));
+  }
+  // the terminal office inside the ring; the workshop on gate B's forecourt
+  // the terminal office in the strip between gate B's in and out roads, its staff car park behind it
+  add(buildToyOffice().group, 0, 58);
+  {
+    // (its own plane: the road meshes are built by now) with white car stalls along its north side
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(32, 22).rotateX(-PI / 2), toyMat(ROAD, {rough: 0.95}));
+    m.position.set(0, 0.55, 87);
+    m.receiveShadow = true;
+    roads.add(m);
+    const stall = toyMat('#f4f6fc', {rough: 0.9});
+    for (let x = -14; x <= 14.1; x += 3.5) {
+      const l = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 7).rotateX(-PI / 2), stall);
+      l.position.set(x, 0.6, 80.5);
+      roads.add(l);
+    }
+  }
   tpl('map-workshop', (Pp) => {
     // the maintenance workshop for the yard equipment: a white shed, blue roof, two tall doors facing the road
     const wall = paint(TOY.white, 0.5);
     const roof = paint(TOY.blue, 0.46);
     const door = toyMat('#3a4466', {rough: 0.7});
-    Pp.ext(wall, 46, 82, 0, 14, 188, 232, 0.6);
-    Pp.ext(roof, 45, 83, 14, 15.4, 187, 233, 0.4);
-    for (const z of [199, 221]) Pp.ext(door, 45.8, 46.2, 0, 11, z - 6, z + 6, 0.1);
-    Pp.ext(toyMat('#e9edf8', {rough: 0.9}), 24, 46, 0.2, 0.5, 188, 232, 0.1);
+    // east of the CFS loop, its doors facing west onto the loop's east leg
+    Pp.ext(wall, 262, 298, 0, 14, 40, 84, 0.6);
+    Pp.ext(roof, 261, 299, 14, 15.4, 39, 85, 0.4);
+    for (const z of [51, 73]) Pp.ext(door, 261.8, 262.2, 0, 11, z - 6, z + 6, 0.1);
+    Pp.ext(toyMat('#e9edf8', {rough: 0.9}), 255, 262, 0.2, 0.5, 40, 84, 0.1);
   }, root);
   add(buildToyOffice({label: 'NORTHBAY RO-RO TERMINAL'}).group, 900, 560);
   // light masts: a row each side between the yard and the crane rails (about every 135 m), in the cross aisles (in the
   // gaps between the RTG blocks), along the gate road
-  const masts = [[-30, 230], [30, 360]];
-  for (const z of [-20, -155, -290, -425, -560]) masts.push([-102, z], [102, z]);
+  // gate B's forecourt: along the queue lane, the truck lot, by both gates, the CFS yard, the strip between the roads
+  const masts = [[-290, 122], [-210, 122], [-168, 45], [-168, 95], [-125, 116], [125, 123], [0, 22], [0, 108], [100, 26], [200, 26], [262, 100]];
+  for (const z of [-20, -155, -290, -425, -560]) masts.push([-102, z], ...(z === -155 ? [] : [[102, z]])); // (none by the empty depot's outer row)
   for (const z of [-176, -361]) for (const x of [-68, 0, 68]) masts.push([x, z]); // in the gaps between the blocks, by the aisles
   // piers A and C: masts just inside the loop lanes (pier A: between the east lane and the silos)
   for (const z of [-40, -200, -390]) masts.push([-392, z]);
@@ -1171,9 +1419,12 @@ export function buildPortMap() {
   L('Karantina hewan', 230, 405, 40, 0.7);
   L('Backland · logistik', 340, 440, 50, 0.9);
   label('Gerbang masuk', -100, 600, 40, 0.8);
-  label('Parkir pra-gate', -145, 250, 30, 0.7);
+  label('Parkir truk', -120, 68, 30, 0.7);
+  label('Gate B masuk', PB.gateIn, PB.laneZ, 30, 0.7);
+  label('Gate B keluar', PB.gateOut, PB.laneZ, 30, 0.7);
   label('Parkir traktor', -65, -20, 25, 0.6);
   label('Parkir alat', 62, -20, 25, 0.6);
+  label('Blok straddle carrier', PB.blocks[1], -457, 30, 0.7);
   label('Gerbang keluar · X-ray', 300, 560, 40, 0.8);
   label('Gerbang energi', -880, 250, 40, 0.8);
   L('Depo kereta', 264, 480, 50, 0.8);
@@ -1210,5 +1461,132 @@ export function buildPortMap() {
     for (const f of ticks) f(t);
   };
   tick(0);
-  return {root, tick, spots, labels, outlines, pads, roads, landMat, ships, routes, gates, pierB};
+  // ---------------------------------------------------------------- the route graph, for the movers
+  // A link joins two routes where one ends on (or starts from) the other: {from, sFrom, to, sTo}. Found from the
+  // geometry (an end within the other road's half width + 4 m). The two-way roads' centre lines stay out: their
+  // per-direction lane routes (.E / .W) carry the links. path(from, to) chains routes into legs [{route, s0, s1}];
+  // follow(legs) gives the length and the pose at a distance along them.
+  const links = [];
+  {
+    const key = new Set();
+    const link = (from, sFrom, to, sTo) => {
+      const k = `${from}>${to}`;
+      if (key.has(k)) return;
+      key.add(k);
+      links.push({from, sFrom, to, sTo});
+    };
+    const all = Object.keys(routes);
+    const oneWay = all.filter((n) => !routes[n].twoWay);
+    const twoWay = all.filter((n) => routes[n].twoWay && routes[`${n}.E`]);
+    for (const a of oneWay) {
+      const A = routes[a];
+      if (A.closed) continue;
+      const [p0, p1] = [A.points[0], A.points[A.points.length - 1]];
+      // onto / off one-way roads (never a lane of a two-way road directly: see below)
+      for (const b of oneWay) {
+        const B = routes[b];
+        if (a === b || B.laneOf) continue;
+        const tol = (B.w ?? 6) / 2 + 4;
+        const e = B.nearest(p1[0], p1[1]);
+        if (e.d <= tol && e.s < B.L - 1) link(a, A.L, b, e.s);
+        const st = B.nearest(p0[0], p0[1]);
+        if (st.d <= tol && st.s > 1) link(b, st.s, a, 0);
+      }
+      // onto / off a two-way road: either of its lanes (turning left or right), never the route's own road (no U-turns)
+      for (const c of twoWay) {
+        if (A.laneOf === c) continue;
+        const C = routes[c];
+        const tol = C.w / 2 + 4;
+        for (const lane of [`${c}.E`, `${c}.W`]) {
+          const Ln = routes[lane];
+          if (C.nearest(p1[0], p1[1]).d <= tol) {
+            const e = Ln.nearest(p1[0], p1[1]);
+            if (e.s < Ln.L - 1) link(a, A.L, lane, e.s);
+          }
+          if (C.nearest(p0[0], p0[1]).d <= tol) {
+            const st = Ln.nearest(p0[0], p0[1]);
+            if (st.s > 1) link(lane, st.s, a, 0);
+          }
+        }
+      }
+    }
+  }
+  /** chain routes from one to another: who ('truck' | 'tractor' | 'sc') keeps each to the roads it may use */
+  const may = {truck: ['all'], tractor: ['all', 'tractor'], sc: ['all', 'tractor', 'sc']};
+  const path = (from, to, {who = 'tractor', sFrom = 0} = {}) => {
+    // the shortest by distance driven (Dijkstra over link states)
+    const ok = (r) => r === from || r === to || may[who].includes(routes[r].users ?? 'all');
+    const open = [{r: from, s: sFrom, d: 0, legs: []}];
+    const done = new Set();
+    while (open.length) {
+      open.sort((a, b) => a.d - b.d);
+      const {r, s, d, legs} = open.shift();
+      const k = `${r}@${Math.round(s / 10)}`;
+      if (done.has(k)) continue;
+      done.add(k);
+      if (r === to) return [...legs, {route: r, s0: s, s1: routes[r].L}];
+      for (const l of links) {
+        if (l.from !== r || !ok(l.to)) continue;
+        const closed = routes[r].closed;
+        if (!closed && l.sFrom < s - 0.5) continue;
+        const run = l.sFrom >= s ? l.sFrom - s : routes[r].L - s + l.sFrom;
+        if (done.has(`${l.to}@${Math.round(l.sTo / 10)}`)) continue;
+        open.push({r: l.to, s: l.sTo, d: d + run, legs: [...legs, {route: r, s0: s, s1: l.sFrom}]});
+      }
+    }
+    return null;
+  };
+  const follow = (legs) => {
+    const len = legs.map(({route: r, s0, s1}) => (s1 >= s0 ? s1 - s0 : routes[r].L - s0 + s1));
+    const L = len.reduce((a, b) => a + b, 0);
+    const at = (d) => {
+      d = Math.min(L, Math.max(0, d));
+      let i = 0;
+      while (i < legs.length - 1 && d > len[i]) d -= len[i++];
+      const {route: r, s0} = legs[i];
+      return routes[r].at((s0 + d) % (routes[r].L + 1e-9));
+    };
+    return {L, at};
+  };
+  // the stops: where a mover waits or parks ({name, x, z, ry}, the tractor's or carrier's centre; route and s where it
+  // sits on one): the gates' queue slots, OCR portals and barriers (2 lanes each), the truck lot's stalls, the tractor
+  // pocket, the CFS docks and its reach stackers' truck spots, the empty depot's handler spot; and per crane its stop
+  // (crane.stop), per RTG block lane and bay pierB.rtgStop(bi, si, z)
+  {
+    const stops = [];
+    const stop = (name, x, z, ry, onRoute = null) => {
+      const o = {name, x, z, ry};
+      if (onRoute) Object.assign(o, {route: onRoute, s: routes[onRoute].nearest(x, z).s});
+      stops.push(o);
+    };
+    const LZ = PB.laneZ;
+    for (const [lane, dz] of [[1, -3], [2, 3]]) {
+      for (let k = 0; k < 7; k++) stop(`gateIn.queue${lane}.${k}`, PB.gateIn - 45 - k * 25, LZ + dz, 0, 'pierB.in');
+      stop(`gateIn.ocr${lane}`, PB.gateIn - 20, LZ + dz, 0, 'pierB.in');
+      stop(`gateIn.barrier${lane}`, PB.gateIn + 3, LZ + dz, 0, 'pierB.in');
+      stop(`gateOut.queue${lane}`, PB.gateOut - 45, LZ + dz, 0, 'pierB.out');
+      stop(`gateOut.ocr${lane}`, PB.gateOut - 20, LZ + dz, 0, 'pierB.out');
+      stop(`gateOut.barrier${lane}`, PB.gateOut + 3, LZ + dz, 0, 'pierB.out');
+    }
+    for (let i = 0; i < 11; i++) {
+      const z = 42.5 + i * 5;
+      stop(`lot.W${i}`, -145, z, 0);
+      stop(`lot.M${i}`, -117, z, PI);
+      stop(`pocket${i}`, -97.5 + i * 5, -27, PI / 2);
+    }
+    [60, 70, 80, 90].forEach((z, i) => stop(`cfs.dock${i + 1}`, 129.5 - 17.25, z, PI));
+    stop('cfs.rs04', 250, 80 + 9.9, -PI / 2, 'cfs');
+    stop('cfs.rs05', 178, 63 - 9.9, PI / 2, 'cfs.middle');
+    stop('empty.eh02', PB.emptyX, -110 - 9.9, PI / 2, 'pierB.emptyAisle');
+    pierB.stops = stops;
+    pierB.stopById = Object.fromEntries(stops.map((o) => [o.name, o]));
+    /** a truck in a block's RTG lane with its box under the RTG's spreader at bay z (sections 0, 1: outside trucks,
+     *  9.9 m box offset; 2: tractors, 9.8) */
+    pierB.rtgStop = (bi, si, z) => {
+      const n = PB.north(bi);
+      const off = PB.outside.includes(si) ? 9.9 : 9.8;
+      return {x: PB.blocks[bi] + PB.lane, z: z + (n ? -off : off), ry: n ? PI / 2 : -PI / 2, route: `pierB.lane${bi}.${si}`};
+    };
+  }
+  return {root, tick, spots, labels, outlines, pads, roads, landMat, ships, routes, links, path, follow, gates, pierB};
 }
